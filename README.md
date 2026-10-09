@@ -17,6 +17,10 @@ cd ~/omarchy-desktop && ./install.sh
 - 不想装标题栏：`./install.sh --no-hyprbars`。
 - 被覆盖的旧文件会备份在 `~/.local/state/omarchy-desktop/backup-<时间>/`。
 
+## 修改记录
+
+所有修改的内容、原因、验证方式与注意事项：[`docs/CHANGES.md`](docs/CHANGES.md)。
+
 ## 平时维护
 
 改过桌面设置、装或删了插件之后：
@@ -26,6 +30,8 @@ cd ~/omarchy-desktop
 ./sync.sh          # 收集目前设置，看有哪些变动
 ./sync.sh --push   # 确认后 commit 并上传
 ```
+
+上传前在 `docs/CHANGES.md` 最上面补一节，写下改了什么、为什么。
 
 ## 内容
 
