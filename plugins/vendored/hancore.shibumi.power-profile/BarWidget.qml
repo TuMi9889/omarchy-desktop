@@ -1,0 +1,199 @@
+pragma ComponentBehavior: Bound
+
+import QtQuick
+import qs.Commons as Commons
+import qs.Ui as Ui
+import "../hancore.shibumi.state/runtime" as SuiteRuntime
+import "../hancore.shibumi.state/lib/presentation" as Presentation
+
+Ui.Panel {
+  id: root
+
+  moduleName: "hancore.shibumi.power-profile"
+  manageIpc: false
+  SuiteRuntime.HostShell { id: suiteShell; host: root.bar ? root.bar.shell : null }
+  Presentation.HostTokens { id: hostTokens; bar: root.bar; serviceShell: suiteShell }
+  property url panelSource: Qt.resolvedUrl("PowerProfilePanel.qml")
+  property var powerServiceOverride: null
+
+  readonly property var powerService: powerServiceOverride !== null ? powerServiceOverride
+    : suiteShell.serviceFor("hancore.shibumi.power-state")
+  readonly property var leaseService: powerService && powerService.ready === true ? powerService : null
+  readonly property var tokens: bar && "visualTokens" in bar
+    && bar.visualTokens ? bar.visualTokens : hostTokens
+  readonly property color widgetInk: tokens
+    && typeof tokens.widgetContentColor === "function"
+    ? tokens.widgetContentColor(settings,
+      bar ? bar.urgent : Commons.Color.accent)
+    : (bar ? bar.urgent : Commons.Color.accent)
+  readonly property string displayMode: String(
+    setting("displayMode", setting("compact", false) ? "icon" : "full"))
+  readonly property bool compact: displayMode === "icon"
+  readonly property bool profileAvailable: !!(powerService && powerService.profileAvailable)
+  readonly property string profile: powerService ? powerService.activeProfile : ""
+  readonly property string shortName: powerService
+    ? powerService.activeProfileShortName : "---"
+  readonly property string profileLabel: powerService
+    ? powerService.activeProfileLabel : "Power profiles unavailable"
+  readonly property string profileIcon: profile === "power-saver" ? "󰌪"
+    : profile === "balanced" ? "󰊚"
+    : profile === "performance" ? "󰓅" : "󰂄"
+  readonly property var interactionTarget: interaction
+  readonly property bool panelLoaded: panelLoader.item !== null
+  readonly property var panelItem: panelLoader.item
+  property var profileOwner: null
+
+  visible: profileAvailable
+  implicitWidth: visible ? (bar && bar.vertical ? bar.barSize : surface.implicitWidth) : 0
+  implicitHeight: visible
+    ? (bar && bar.vertical ? surface.implicitHeight : bar ? bar.barSize : 28) : 0
+
+  function childPanelWidget(pluginId) {
+    return String(pluginId || "") === "omarchy.power" ? root : null
+  }
+
+  function syncProfileLease() {
+    if (leaseService === profileOwner) return
+    if (profileOwner) profileOwner.releaseProfiles()
+    profileOwner = leaseService && leaseService.acquireProfiles() !== false ? leaseService : null
+  }
+
+  function syncPanelLoader() {
+    if (!opened || !profileAvailable) {
+      panelLoader.source = ""
+      return
+    }
+    panelLoader.setSource(panelSource, {
+      anchorItem: surface,
+      bar: Qt.binding(function() { return root.bar }),
+      ownerWidget: root,
+      powerService: Qt.binding(function() { return root.powerService })
+    })
+  }
+
+  function activate(button) {
+    if (!powerService || !profileAvailable) return false
+    if (button === Qt.RightButton) return powerService.cycleProfile()
+    toggle()
+    return true
+  }
+
+  onOpenedChanged: syncPanelLoader()
+  onProfileAvailableChanged: if (!profileAvailable && opened) close()
+  onLeaseServiceChanged: syncProfileLease()
+  onPowerServiceChanged: {
+    if (!powerService && opened) close()
+    if (opened && !panelLoader.item) syncPanelLoader()
+  }
+  Component.onCompleted: syncProfileLease()
+  Component.onDestruction: {
+    if (profileOwner) profileOwner.releaseProfiles()
+    profileOwner = null
+  }
+
+  Item {
+    id: surface
+    anchors.centerIn: parent
+    implicitWidth: !root.bar || !root.tokens ? 0
+      : root.bar.vertical ? root.bar.barSize
+      : content.implicitWidth + 2 * root.tokens.pillPaddingX
+    implicitHeight: !root.bar || !root.tokens ? 0
+      : root.bar.vertical ? content.implicitHeight + Commons.Style.space(10)
+      : root.tokens.slotHeight
+    width: implicitWidth
+    height: implicitHeight
+
+    Presentation.PillSurface {
+      tokenSource: root.tokens
+      settings: root.settings
+      v1AppearanceEnabled: true
+      anchors.fill: parent
+      anchors.topMargin: root.tokens
+        ? Math.round((parent.height - root.tokens.pillHeight) / 2) : 0
+      anchors.bottomMargin: root.tokens
+        ? Math.round((parent.height - root.tokens.pillHeight) / 2) : 0
+      bar: root.bar
+    }
+
+    Loader {
+      id: content
+      anchors.centerIn: parent
+      sourceComponent: !root.bar || !root.tokens ? null
+        : root.bar.vertical || root.displayMode === "icon" ? compactContent
+        : root.tokens.v2Shell === true && root.displayMode === "full" ? compactContent
+        : root.displayMode === "text" ? textContent : fullContent
+    }
+
+    MouseArea {
+      id: interaction
+      anchors.fill: parent
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onEntered: if (root.bar) root.bar.showTooltip(surface, root.profileLabel)
+      onExited: if (root.bar) root.bar.hideTooltip(surface)
+      onClicked: function(event) {
+        if (root.bar) root.bar.hideTooltip(surface)
+        root.activate(event.button)
+      }
+    }
+  }
+
+  Loader { id: panelLoader }
+
+  Component {
+    id: fullContent
+    Row {
+      spacing: root.tokens.contentGap
+      Presentation.IconText {
+        barText: true
+        visible: root.displayMode === "full"
+        anchors.verticalCenter: parent.verticalCenter
+        text: "PWR"
+        color: Qt.rgba(root.widgetInk.r, root.widgetInk.g,
+          root.widgetInk.b, 0.68)
+        font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
+        font.pixelSize: root.tokens.labelSize
+        font.letterSpacing: 0.5
+        renderType: Text.NativeRendering
+      }
+      Presentation.IconText {
+        barText: true
+        anchors.verticalCenter: parent.verticalCenter
+        text: root.shortName
+        color: root.widgetInk
+        font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
+        font.pixelSize: root.tokens.labelSize
+        renderType: Text.NativeRendering
+      }
+    }
+  }
+
+  Component {
+    id: compactContent
+    Presentation.BarGlyph {
+      optical: !root.bar || !root.bar.vertical
+      // Reserve the original advance; only paint uses the native panel glyph.
+      text: root.profile === "power-saver" ? "\uF06C"
+        : root.profile === "performance" ? "\uF0E7" : "\uF24E"
+      paintText: root.profileIcon
+      color: root.widgetInk
+      font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
+      font.pixelSize: root.profile === "balanced" ? 13 : 14
+      renderType: Text.QtRendering
+    }
+  }
+
+  Component {
+    id: textContent
+
+    Presentation.IconText {
+      barText: true
+      text: root.shortName
+      color: root.widgetInk
+      font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
+      font.pixelSize: root.tokens.labelSize
+      renderType: Text.NativeRendering
+    }
+  }
+}

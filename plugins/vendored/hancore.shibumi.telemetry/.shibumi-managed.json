@@ -1,0 +1,10 @@
+{
+  "payloadDigest": "6d29ab5ba1335fb0614c58a0fbf4f2717e6bc6aa99caa98ff7c52e384a0a5615",
+  "pluginId": "hancore.shibumi.telemetry",
+  "schemaVersion": 1,
+  "sourceRevision": "bd1224ba92fbf279666abe362ff5cf7a165da096",
+  "suiteId": "hancore.shibumi",
+  "suitePayloadDigest": "79c61d5e048c669c9eb27ebaad21987327892089daea501d0cf4185150a26f9e",
+  "suiteVersion": "0.1.1-beta.16.2",
+  "transaction": "1791561209-160411-cc55d57f"
+}

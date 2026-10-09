@@ -1,0 +1,6 @@
+singleton BluetoothDiscoveryGuard 1.0 BluetoothDiscoveryGuard.qml
+BarWidget 1.0 BarWidget.qml
+BluetoothBackendAdapter 1.0 BluetoothBackendAdapter.qml
+BluetoothAudioRouteAdapter 1.0 BluetoothAudioRouteAdapter.qml
+BluetoothPanel 1.0 BluetoothPanel.qml
+Service 1.0 Service.qml

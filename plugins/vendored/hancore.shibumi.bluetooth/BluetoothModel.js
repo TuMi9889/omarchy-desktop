@@ -1,0 +1,155 @@
+function deviceLabel(device) {
+  if (!device) return ""
+  return String(device.deviceName || device.name || "").trim()
+}
+
+function toArray(values) {
+  if (!values) return []
+  if (Array.isArray(values)) return values.slice()
+
+  var length = Number(values.length || 0)
+  if (!isFinite(length) || length <= 0) return []
+
+  var list = []
+  for (var i = 0; i < length; i++) list.push(values[i])
+  return list
+}
+
+function isUuidLike(value) {
+  var text = String(value || "").trim()
+  if (text === "") return false
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)
+    || /^[0-9a-f]{32}$/i.test(text)
+    || /^0x[0-9a-f]{4,32}$/i.test(text)
+    || /^0000[0-9a-f]{4}-0000-1000-8000-00805f9b34fb$/i.test(text)
+}
+
+function isAddressLike(value) {
+  return /^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(String(value || "").trim())
+}
+
+function hasHumanName(device) {
+  var label = deviceLabel(device)
+  return label !== "" && !isUuidLike(label) && !isAddressLike(label)
+}
+
+function sortedByLabel(devices) {
+  var list = toArray(devices)
+  list.sort(function(a, b) { return deviceLabel(a).localeCompare(deviceLabel(b)) })
+  return list
+}
+
+// Copy only presentation and action-identity primitives out of a native
+// BluetoothDevice. Native QObjects stay private to BluetoothBackendAdapter.
+function deviceRecord(device, identity) {
+  var source = device || ({})
+  var binding = identity || ({})
+  return {
+    address: String(source.address || "").trim(),
+    name: String(source.name || ""),
+    deviceName: String(source.deviceName || ""),
+    icon: String(source.icon || ""),
+    state: Number(source.state || 0),
+    connected: source.connected === true,
+    paired: source.paired === true,
+    bonded: source.bonded === true,
+    pairing: source.pairing === true,
+    trusted: source.trusted === true,
+    batteryAvailable: source.batteryAvailable === true,
+    battery: Number(source.battery || 0),
+    entityId: String(binding.entityId || ""),
+    generation: Number(binding.generation || 0),
+    adapterId: String(binding.adapterId || ""),
+    adapterEntityId: String(binding.adapterEntityId || ""),
+    adapterGeneration: Number(binding.adapterGeneration || 0)
+  }
+}
+
+function deviceLists(devices) {
+  var values = toArray(devices)
+  var connected = []
+  var known = []
+  var discovered = []
+
+  for (var i = 0; i < values.length; i++) {
+    var device = values[i]
+    if (!device || !hasHumanName(device)) continue
+    if (device.connected) connected.push(device)
+    else if (device.paired || device.bonded || device.trusted) known.push(device)
+    else discovered.push(device)
+  }
+
+  return {
+    connected: sortedByLabel(connected),
+    known: sortedByLabel(known),
+    discovered: sortedByLabel(discovered)
+  }
+}
+
+function normalizedAddress(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^0-9a-f]/g, "")
+}
+
+function nodeProperties(node) {
+  return node && node.ready && node.properties ? node.properties : ({})
+}
+
+function nodeText(node) {
+  var properties = nodeProperties(node)
+  return [
+    node ? node.name : "",
+    node ? node.description : "",
+    node ? node.nickname : "",
+    node ? node.nick : "",
+    properties["node.name"],
+    properties["node.description"],
+    properties["node.nick"],
+    properties["device.name"],
+    properties["device.description"],
+    properties["device.product.name"],
+    properties["device.alias"],
+    properties["device.string"],
+    properties["api.bluez5.address"],
+    properties["bluez5.address"],
+    properties["media.name"]
+  ].join(" ").toLowerCase()
+}
+
+function bluetoothSinkMatchesDevice(node, device) {
+  if (!node || !node.isSink || node.isStream || !device) return false
+
+  var rawAddress = String(device.address || "").trim()
+  var address = normalizedAddress(rawAddress)
+  var properties = nodeProperties(node)
+  var nodeAddress = normalizedAddress(
+    properties["api.bluez5.address"] || properties["bluez5.address"])
+  var text = nodeText(node)
+  // A supplied Bluetooth address is authoritative. Never route to a same-name
+  // sink when its address is absent, invalid, or different.
+  if (rawAddress !== "") {
+    if (!isAddressLike(rawAddress)) return false
+    if (node.ready === false) {
+      var nodeName = String(node.name || "").toLowerCase()
+      return nodeName.indexOf("bluez_output.") === 0
+        && normalizedAddress(nodeName).indexOf(address) !== -1
+    }
+    return nodeAddress !== "" && nodeAddress === address
+  }
+
+  var label = deviceLabel(device).toLowerCase()
+  return label !== "" && text.indexOf(label) !== -1
+}
+
+function cloneMap(map) {
+  var next = ({})
+  for (var key in map || {}) next[key] = map[key]
+  return next
+}
+
+function withPendingAction(actions, address, action) {
+  var next = cloneMap(actions)
+  if (!address) return next
+  if (action) next[address] = action
+  else delete next[address]
+  return next
+}

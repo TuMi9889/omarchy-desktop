@@ -1,0 +1,1863 @@
+#!/usr/bin/env python3
+"""Read-only Shibumi runtime, package, and source-checkout diagnostics."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+
+SUITE_ID = "hancore.shibumi"
+MANAGED_MARKER = ".shibumi-managed.json"
+STATUS_ORDER = {"error": 0, "warning": 1, "ok": 2, "info": 3}
+ERROR_PATTERNS = re.compile(
+    r"binding loop|referenceerror|typeerror|failed to load|error loading|"
+    r"could not resolve type|is not a type|cannot assign|unable to assign|"
+    r"loader.*error|host.facade|provider.*compatib",
+    re.IGNORECASE,
+)
+WARNING_PATTERN = re.compile(
+    r"^[\s\d:.,+\-TZ\[\]]{0,96}warn(?:ing)?(?=\s|:)", re.IGNORECASE
+)
+LOG_TAIL_LINES = 400
+LOG_FULL_READ_LIMIT = 8 * 1024 * 1024
+LOG_TAIL_BYTES = 1024 * 1024
+LOG_DETAIL_FINDINGS = 8
+INSTANCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
+SENSITIVE_PATTERNS = re.compile(
+    r"authorization|cookie|credential|password|secret|ssid|token",
+    re.IGNORECASE,
+)
+SOURCE_PATH_PATTERN = re.compile(
+    r"(?P<path>(?:file://)?(?:/|~/|[A-Za-z0-9_.-]+/)[^\s\"'`()]+?"
+    r"\.(?:qml|js|py|sh)(?::\d+(?::\d+)?)?(?=$|[\s,;:)\]]))",
+    re.IGNORECASE,
+)
+EXPLICIT_PLUGIN_PATTERN = re.compile(
+    r"(?i)\b(?:plugin|component|source|module)\s*[:=]\s*[\"']?"
+    r"(?P<id>[A-Za-z0-9_.-]+)"
+)
+URL_AUTHORITY_PATTERN = re.compile(
+    r"(?i)\b[A-Za-z][A-Za-z0-9+.-]*://(?!/)[^/\s]+"
+)
+OWNER_SHIBUMI = "shibumi"
+OWNER_OMARCHY = "omarchy"
+OWNER_THIRD_PARTY = "third-party"
+OWNER_UNKNOWN = "unknown"
+OWNERS = {
+    OWNER_SHIBUMI,
+    OWNER_OMARCHY,
+    OWNER_THIRD_PARTY,
+    OWNER_UNKNOWN,
+}
+OWNER_ORDER = {
+    OWNER_SHIBUMI: 0,
+    OWNER_OMARCHY: 1,
+    OWNER_THIRD_PARTY: 2,
+    OWNER_UNKNOWN: 3,
+}
+PACKAGE_NAME = "shibumi-shell"
+STATE_PLUGIN_ID = "hancore.shibumi.state"
+STATE_STORAGE_SCHEMA = "shibumiStateSchemaVersion"
+SHELL_STYLES = {"shibumi", "full", "fit", "dock", "notch"}
+AUR_INFO_URL = (
+    "https://aur.archlinux.org/rpc/v5/info?arg%5B%5D=shibumi-shell"
+)
+
+
+@dataclass
+class Check:
+    id: str
+    group: str
+    label: str
+    status: str
+    value: str
+    detail: str = ""
+    component: str = ""
+    action: str = ""
+    owner: str = OWNER_UNKNOWN
+    sourcePath: str = ""
+    pluginId: str = ""
+    issueEligible: bool = False
+    upstream: str = ""
+
+
+def safe_text(value: Any, limit: int = 320) -> str:
+    text = " ".join(str(value or "").replace("\x00", "").split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def safe_public_text(value: Any, limit: int = 320) -> str:
+    text = str(value or "").replace("\x00", "")
+    text = re.sub(r"(?<![A-Za-z0-9._-])/home/[^/\s]+", "~", text)
+    text = re.sub(
+        r"(?i)\b[A-Za-z][A-Za-z0-9+.-]*://[^\s]+",
+        "[URL redacted]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(?:bearer|basic)\s+[^\s]+",
+        "[authorization redacted]",
+        text,
+    )
+    text = re.sub(
+        r'''(?i)\b(?:password|passwd|passphrase|token|secret|cookie|credential|ssid|authorization)\b\s*["']?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^,\s}]+)''',
+        "[sensitive value redacted]",
+        text,
+    )
+    if SENSITIVE_PATTERNS.search(text):
+        return "[sensitive diagnostic redacted]"
+    return safe_text(text, limit)
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("expected a JSON object")
+    return value
+
+
+def read_json_list(path: Path) -> list[Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, list):
+        raise ValueError("expected a JSON array")
+    return value
+
+
+def run(
+    command: list[str],
+    *,
+    timeout: float = 5,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env=environment,
+    )
+
+
+def configured_timeout(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return min(default, max(0.05, value))
+
+
+def version_key(value: str) -> tuple[int, int, int, int, tuple[tuple[int, Any], ...]]:
+    """Match the suite CLI's strict SemVer precedence without importing a checkout."""
+    identifier = r"[0-9A-Za-z-]+"
+    match = re.fullmatch(
+        r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+        rf"(?:-({identifier}(?:\.{identifier})*))?"
+        rf"(?:\+{identifier}(?:\.{identifier})*)?",
+        value,
+    )
+    if not match:
+        raise ValueError(f"unsupported Shibumi version: {value}")
+    prerelease = match.group(4)
+    prerelease_parts = prerelease.split(".") if prerelease else []
+    if any(
+        item.isdigit() and len(item) > 1 and item.startswith("0")
+        for item in prerelease_parts
+    ):
+        raise ValueError(f"unsupported Shibumi version: {value}")
+    identifiers: tuple[tuple[int, Any], ...] = tuple(
+        (0, int(item)) if item.isdigit() else (1, item)
+        for item in prerelease_parts
+    )
+    return (
+        int(match.group(1)),
+        int(match.group(2)),
+        int(match.group(3)),
+        0 if prerelease else 1,
+        identifiers,
+    )
+
+
+def latest_release_tag(values: list[str]) -> str | None:
+    """Return the greatest strict ``v<SemVer>`` tag, deterministically."""
+    candidates: list[
+        tuple[tuple[int, int, int, int, tuple[tuple[int, Any], ...]], str]
+    ] = []
+    for value in values:
+        tag = value.strip()
+        if not tag.startswith("v"):
+            continue
+        try:
+            key = version_key(tag[1:])
+        except ValueError:
+            continue
+        candidates.append((key, tag))
+    return max(candidates, default=(None, ""), key=lambda item: (item[0], item[1]))[1] or None
+
+
+def payload_digest(directory: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"shibumi-plugin-payload-v1\0")
+    for path in sorted(
+        directory.rglob("*"), key=lambda item: item.relative_to(directory).as_posix()
+    ):
+        relative = path.relative_to(directory).as_posix()
+        if (relative == MANAGED_MARKER
+                or "__pycache__" in Path(relative).parts
+                or path.suffix in {".pyc", ".pyo"}):
+            continue
+        metadata = path.lstat()
+        if path.is_symlink():
+            raise ValueError(f"symlink in payload: {relative}")
+        if path.is_dir():
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"special file in payload: {relative}")
+        digest.update(b"file\0")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(("111" if metadata.st_mode & 0o100 else "0").encode("ascii"))
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+class Probe:
+    def __init__(self, fetch: bool) -> None:
+        self.fetch = fetch
+        self.home = Path(os.environ.get("SHIBUMI_HEALTH_HOME", Path.home()))
+        config_home = Path(
+            os.environ.get("XDG_CONFIG_HOME", self.home / ".config")
+        )
+        state_home = Path(
+            os.environ.get("XDG_STATE_HOME", self.home / ".local/state")
+        )
+        self.omarchy_root = Path(
+            os.environ.get("OMARCHY_PATH", "/usr/share/omarchy")
+        )
+        self.config_path = Path(
+            os.environ.get(
+                "SHIBUMI_CONFIG_FILE", config_home / "omarchy/shell.json"
+            )
+        )
+        self.defaults_path = Path(
+            os.environ.get(
+                "SHIBUMI_DEFAULT_CONFIG",
+                self.omarchy_root / "config/omarchy/shell.json",
+            )
+        )
+        self.plugin_dir = Path(
+            os.environ.get(
+                "SHIBUMI_PLUGIN_DIR", config_home / "omarchy/plugins"
+            )
+        )
+        self.state_dir = Path(
+            os.environ.get("SHIBUMI_STATE_DIR", state_home / "shibumi")
+        )
+        self.checks: list[Check] = []
+        self.state: dict[str, Any] = {}
+        self.config: dict[str, Any] = {}
+        self.shell_style: str | None = None
+        self.shell_style_source = ""
+        self.registry: list[dict[str, Any]] = []
+        self.processes: list[dict[str, Any]] = []
+        self.production_pids: list[int] = []
+        self.production_instance_id = ""
+        self.production_responsive = False
+        self.process_probe_failed = False
+
+    def add(
+        self,
+        check_id: str,
+        group: str,
+        label: str,
+        status: str,
+        value: str,
+        detail: str = "",
+        component: str = "",
+        action: str = "",
+        owner: str = OWNER_UNKNOWN,
+        source_path: str = "",
+        plugin_id: str = "",
+        issue_eligible: bool = False,
+        upstream: str = "",
+    ) -> None:
+        safe_owner = owner if owner in OWNERS else OWNER_UNKNOWN
+        self.checks.append(
+            Check(
+                check_id,
+                group,
+                label,
+                status if status in STATUS_ORDER else "error",
+                self.public_text(value, 120),
+                self.public_text(detail, 900),
+                self.public_text(self.display_path(component), 240),
+                self.public_text(action, 240),
+                safe_owner,
+                self.public_text(self.display_path(source_path), 240)
+                if source_path else "",
+                self.public_text(plugin_id, 240),
+                bool(issue_eligible and safe_owner == OWNER_SHIBUMI),
+                self.public_text(upstream, 240),
+            )
+        )
+
+    def display_path(self, value: str | Path) -> str:
+        text = self.redact_home_paths(value)
+        return safe_text(text, 240)
+
+    def redact_home_paths(self, value: str | Path) -> str:
+        """Hide user names in both the active and foreign home paths."""
+        text = str(value or "")
+        home = str(self.home)
+        if home:
+            if text == home:
+                text = "~"
+            else:
+                text = text.replace(home + "/", "~/")
+        return re.sub(r"(?<![A-Za-z0-9._-])/home/[^/\s]+", "~", text)
+
+    def public_text(self, value: Any, limit: int = 320) -> str:
+        """Return bounded diagnostic text safe for clipboard and issue drafts."""
+        return safe_public_text(self.redact_home_paths(value), limit)
+
+    def is_omarchy_path(self, value: Any) -> bool:
+        text = str(value or "").replace("file://", "")
+        text = re.sub(r":\d+(?::\d+)?$", "", text)
+        if not text.startswith("/"):
+            return False
+        candidate = os.path.normpath(text).lower()
+        roots = (
+            Path("/usr/share/omarchy"),
+            self.omarchy_root,
+            self.home / ".local/share/omarchy",
+        )
+        return any(
+            candidate == os.path.normpath(root).lower()
+            or candidate.startswith(os.path.normpath(root).lower() + "/")
+            for root in roots
+        )
+
+    def plugin_id_for_path(self, value: Any) -> str:
+        text = str(value or "").replace("file://", "")
+        text = re.sub(r":\d+(?::\d+)?$", "", text)
+        roots = [str(self.plugin_dir).rstrip("/")]
+        foreign_root = re.match(r"^/(?:home/[^/\s]+|root)/\.config/omarchy/plugins", text)
+        if foreign_root:
+            roots.append(foreign_root.group(0))
+        for root in roots:
+            prefix = root + "/"
+            if text.startswith(prefix):
+                plugin_id = text[len(prefix):].split("/", 1)[0]
+                return plugin_id
+        return ""
+
+    def source_paths(self, value: Any) -> list[str]:
+        text = str(value or "").replace("file://", "")
+        paths: list[str] = []
+        for match in SOURCE_PATH_PATTERN.finditer(text):
+            candidate = match.group("path").rstrip(".,;)]}")
+            if candidate.startswith("//") or candidate in paths:
+                continue
+            paths.append(candidate)
+        return paths
+
+    def source_path(self, value: Any) -> str:
+        """Return the first source path for compatibility with diagnostics callers."""
+        return (self.source_paths(value) or [""])[0]
+
+    def known_plugin_ids(self) -> dict[str, str]:
+        """Return plugin IDs verified by install state or the live registry."""
+        known: dict[str, str] = {}
+        state_plugins = self.state.get("plugins", [])
+        if isinstance(state_plugins, list):
+            for plugin_id in state_plugins:
+                if isinstance(plugin_id, str) and plugin_id:
+                    known.setdefault(plugin_id.lower(), plugin_id)
+        for entry in self.registry:
+            plugin_id = entry.get("id")
+            if isinstance(plugin_id, str) and plugin_id:
+                known.setdefault(plugin_id.lower(), plugin_id)
+        return known
+
+    def plugin_owner(self, plugin_id: str) -> str:
+        lowered = plugin_id.lower()
+        if lowered.startswith("hancore.shibumi."):
+            return OWNER_SHIBUMI
+        if lowered.startswith("omarchy."):
+            return OWNER_OMARCHY
+        return OWNER_THIRD_PARTY
+
+    def attributed(self, owner: str, source_paths: list[str], plugin_ids: list[str]) -> dict[str, str]:
+        return {
+            "owner": owner,
+            "sourcePath": "; ".join(source_paths),
+            "pluginId": "; ".join(dict.fromkeys(plugin_ids)),
+        }
+
+    def attribute_source(self, value: Any) -> dict[str, str]:
+        """Classify only authoritative, unambiguous local runtime sources."""
+        raw_text = str(value or "")
+        if URL_AUTHORITY_PATTERN.search(raw_text):
+            return self.attributed(OWNER_UNKNOWN, [], [])
+        text = raw_text.replace("file://", "")
+        paths = self.source_paths(text)
+        known = self.known_plugin_ids()
+        omarchy_paths = [path for path in paths if self.is_omarchy_path(path)]
+        plugin_candidates: list[tuple[str, str]] = []
+        unverified_plugin_paths: list[tuple[str, str]] = []
+        unrelated_paths: list[str] = []
+        for path in paths:
+            if path in omarchy_paths:
+                continue
+            candidate = self.plugin_id_for_path(path)
+            if not candidate:
+                unrelated_paths.append(path)
+                continue
+            verified = known.get(candidate.lower(), "")
+            if verified:
+                plugin_candidates.append((path, verified))
+            else:
+                unverified_plugin_paths.append((path, candidate))
+        all_evidence_paths = [
+            *omarchy_paths,
+            *[path for path, _ in plugin_candidates],
+            *[path for path, _ in unverified_plugin_paths],
+            *unrelated_paths,
+        ]
+        competing_unrelated_paths = [
+            path
+            for path in unrelated_paths
+            if path.startswith("/") or path.startswith("~/")
+        ]
+
+        # Explicit plugin fields are accepted only when install state or the
+        # live registry verifies every ID. Bare names in free-form text remain
+        # unknown because they do not identify an authoritative local source.
+        explicit_ids = [
+            match.group("id")
+            for match in EXPLICIT_PLUGIN_PATTERN.finditer(text)
+        ]
+        verified_explicit_ids = [
+            known.get(plugin_id.lower(), "") for plugin_id in explicit_ids
+        ]
+        explicit_owners = {
+            self.plugin_owner(plugin_id)
+            for plugin_id in verified_explicit_ids
+            if plugin_id
+        }
+
+        # Canonical Omarchy source roots take precedence over incidental plugin
+        # names, but not over competing source evidence. An explicit, verified
+        # Omarchy ID is compatible; any other or unverified evidence is not.
+        omarchy_is_unambiguous = (
+            not plugin_candidates
+            and not unverified_plugin_paths
+            and not competing_unrelated_paths
+            and (
+                not explicit_ids
+                or (
+                    all(verified_explicit_ids)
+                    and explicit_owners == {OWNER_OMARCHY}
+                )
+            )
+        )
+        if omarchy_paths and omarchy_is_unambiguous:
+            source_lowered = omarchy_paths[0].lower()
+            plugin_id = ""
+            if "activewindow.qml" in source_lowered:
+                plugin_id = "omarchy.active-window"
+            elif "/shell/" + "plugins/" in source_lowered:
+                plugin_id = "omarchy.shell"
+            return self.attributed(
+                OWNER_OMARCHY,
+                omarchy_paths,
+                [plugin_id] if plugin_id else [],
+            )
+        if omarchy_paths:
+            return self.attributed(
+                OWNER_UNKNOWN,
+                all_evidence_paths,
+                [plugin_id for _, plugin_id in unverified_plugin_paths]
+                + [plugin_id for _, plugin_id in plugin_candidates]
+                + explicit_ids,
+            )
+
+        if (
+            unverified_plugin_paths
+            or unrelated_paths
+            or (explicit_ids and not all(verified_explicit_ids))
+        ):
+            return self.attributed(
+                OWNER_UNKNOWN,
+                all_evidence_paths,
+                [
+                    plugin_id
+                    for _, plugin_id in unverified_plugin_paths
+                ] + explicit_ids,
+            )
+
+        evidence_ids = [
+            *[plugin_id for _, plugin_id in plugin_candidates],
+            *verified_explicit_ids,
+        ]
+        if not evidence_ids:
+            return self.attributed(OWNER_UNKNOWN, all_evidence_paths, [])
+        owners = {self.plugin_owner(plugin_id) for plugin_id in evidence_ids}
+        if len(owners) != 1:
+            return self.attributed(OWNER_UNKNOWN, all_evidence_paths, evidence_ids)
+        return self.attributed(owners.pop(), all_evidence_paths, evidence_ids)
+
+    @staticmethod
+    def config_entry_id(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict) and isinstance(value.get("id"), str):
+            return value["id"]
+        return ""
+
+    @staticmethod
+    def normalized_shell_style(settings: dict[str, Any]) -> str:
+        presentation = settings.get("presentation")
+        presentation = presentation if isinstance(presentation, dict) else {}
+        candidate = presentation.get("shellStyle")
+        return candidate if candidate in SHELL_STYLES else "shibumi"
+
+    def configured_shell_style(self) -> tuple[str, str]:
+        """Read the form from canonical State, with pre-migration compatibility."""
+        bar = self.config.get("bar")
+        bar = bar if isinstance(bar, dict) else {}
+        entries = self.config.get("plugins")
+        canonical_expected = self.state.get("settingsStorageVersion") == 1
+
+        if entries is None:
+            if canonical_expected:
+                raise ValueError("canonical State service entry is missing")
+            matches: list[Any] = []
+        elif not isinstance(entries, list):
+            raise ValueError("plugins must be an array")
+        else:
+            matches = [
+                entry
+                for entry in entries
+                if self.config_entry_id(entry) == STATE_PLUGIN_ID
+            ]
+            if len(matches) > 1 or (matches and not isinstance(matches[0], dict)):
+                raise ValueError("State service entry is ambiguous")
+
+        entry = matches[0] if matches else None
+        canonical_present = isinstance(entry, dict) and (
+            STATE_STORAGE_SCHEMA in entry or "shibumi" in entry
+        )
+        if canonical_expected and entry is None:
+            raise ValueError("canonical State service entry is missing")
+        if canonical_expected or canonical_present:
+            layout = bar.get("layout")
+            if (
+                type(self.config.get("version")) not in (int, float)
+                or self.config["version"] != 1
+                or not isinstance(entries, list)
+                or len(entries) > 512
+                or not isinstance(layout, dict)
+                or any(
+                    not isinstance(layout.get(region), list)
+                    for region in ("left", "center", "right")
+                )
+            ):
+                raise ValueError("canonical State shell envelope is invalid")
+            if any(
+                self.config_entry_id(layout_entry) == STATE_PLUGIN_ID
+                for region in ("left", "center", "right")
+                for layout_entry in layout[region]
+            ):
+                raise ValueError("State service must not be a bar layout entry")
+            if (
+                not isinstance(entry, dict)
+                or type(entry.get(STATE_STORAGE_SCHEMA)) not in (int, float)
+                or entry[STATE_STORAGE_SCHEMA] != 1
+                or not isinstance(entry.get("shibumi"), dict)
+                or type(entry["shibumi"].get("version")) not in (int, float)
+                or entry["shibumi"]["version"] != 1
+            ):
+                raise ValueError(
+                    "canonical State settings are invalid; refusing legacy fallback"
+                )
+            return self.normalized_shell_style(entry["shibumi"]), "State service"
+
+        legacy = bar.get("shibumi", {"version": 1})
+        version = legacy.get("version", 1) if isinstance(legacy, dict) else None
+        if not isinstance(legacy, dict) or not (
+            (type(version) in (int, float) and version == 1) or version == "1"
+        ):
+            raise ValueError("legacy Shibumi settings are invalid")
+        return self.normalized_shell_style(legacy), "legacy bar settings"
+
+    def load_state_and_config(self) -> None:
+        state_path = self.state_dir / "install.json"
+        try:
+            self.state = read_json(state_path)
+            plugins = self.state.get("plugins")
+            activation = self.state.get("activation")
+            if (
+                self.state.get("suiteId") != SUITE_ID
+                or not isinstance(plugins, list)
+                or not isinstance(activation, dict)
+            ):
+                raise ValueError("unsupported install-state schema")
+            origin = str(self.state.get("installOrigin") or "checkout")
+            if origin not in ("checkout", "package"):
+                raise ValueError("unsupported install origin")
+            if origin == "package" and (
+                self.state.get("packageName") != PACKAGE_NAME
+                or not isinstance(self.state.get("packageVersion"), str)
+                or not self.state.get("packageVersion")
+            ):
+                raise ValueError("package install metadata is incomplete")
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            self.add(
+                "install-state",
+                "Runtime",
+                "Install state",
+                "error",
+                "Invalid",
+                str(error),
+                state_path,
+                "Run shibumi-suite repair after reviewing the state file.",
+            )
+            self.state = {}
+
+        source = (
+            self.config_path
+            if self.config_path.is_file() and self.config_path.stat().st_size > 0
+            else self.defaults_path
+        )
+        try:
+            self.config = read_json(source)
+            if not isinstance(self.config.get("bar"), dict):
+                raise ValueError("bar configuration is missing")
+            self.shell_style, self.shell_style_source = (
+                self.configured_shell_style()
+            )
+            self.add(
+                "configuration",
+                "Runtime",
+                "Configuration",
+                "ok",
+                "Schema valid",
+                f"Shell form read from {self.shell_style_source} configuration.",
+                source,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            self.add(
+                "configuration",
+                "Runtime",
+                "Configuration",
+                "error",
+                "Invalid",
+                str(error),
+                source,
+                "Repair the configuration before reloading the shell.",
+            )
+            self.shell_style = None
+            self.shell_style_source = ""
+            if not isinstance(self.config.get("bar"), dict):
+                self.config = {"bar": {}}
+
+    def load_registry(self) -> None:
+        fixture = os.environ.get("SHIBUMI_HEALTH_REGISTRY_FILE")
+        try:
+            if fixture:
+                values = read_json_list(Path(fixture))
+            else:
+                command = self.omarchy_root / "bin/omarchy-shell"
+                environment = os.environ.copy()
+                environment["OMARCHY_PATH"] = str(self.omarchy_root)
+                result = run(
+                    [str(command), "shell", "listPlugins"],
+                    timeout=5,
+                    environment=environment,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr or result.stdout or "registry failed")
+                values = json.loads(result.stdout)
+            if not isinstance(values, list):
+                raise ValueError("registry result is not an array")
+            self.registry = [item for item in values if isinstance(item, dict)]
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            json.JSONDecodeError,
+            subprocess.TimeoutExpired,
+        ) as error:
+            self.add(
+                "plugin-registry",
+                "Plugins",
+                "Plugin registry",
+                "error",
+                "Unavailable",
+                str(error),
+                self.omarchy_root / "bin/omarchy-shell",
+                "Confirm that the Omarchy shell answers IPC requests.",
+            )
+            self.registry = []
+
+    def load_processes(self) -> None:
+        fixture = os.environ.get("SHIBUMI_HEALTH_PROCESS_FILE")
+        try:
+            if fixture:
+                values = read_json_list(Path(fixture))
+            else:
+                result = run(["qs", "list", "--all", "--json"], timeout=3)
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        result.stderr or result.stdout or "instance query failed"
+                    )
+                if result.stdout == "No running instances.\n":
+                    values = []
+                else:
+                    values = json.loads(result.stdout)
+                if not isinstance(values, list):
+                    raise ValueError("instance result is not an array")
+
+            self.processes = [item for item in values if isinstance(item, dict)]
+            production_config = os.path.normpath(
+                str(self.omarchy_root / "shell/shell.qml")
+            )
+            production_instances = [
+                item for item in self.processes
+                if os.path.normpath(str(item.get("config_path") or ""))
+                == production_config
+                and int(item.get("pid", 0)) > 0
+            ]
+            self.production_pids = sorted(
+                {int(item["pid"]) for item in production_instances}
+            )
+            if len(self.production_pids) == 1:
+                selected = [
+                    item for item in production_instances
+                    if int(item["pid"]) == self.production_pids[0]
+                ]
+                if len(selected) == 1 and isinstance(selected[0].get("id"), str):
+                    self.production_instance_id = selected[0]["id"]
+
+            fixture_live = os.environ.get("SHIBUMI_HEALTH_PROCESS_LIVE")
+            if fixture and fixture_live is not None:
+                self.production_responsive = fixture_live.lower() == "true"
+            elif fixture:
+                self.production_responsive = True
+            elif len(self.production_pids) == 1:
+                command = self.omarchy_root / "bin/omarchy-shell"
+                environment = os.environ.copy()
+                environment["OMARCHY_PATH"] = str(self.omarchy_root)
+                result = run(
+                    [str(command), "shell", "ping"],
+                    timeout=3,
+                    environment=environment,
+                )
+                self.production_responsive = (
+                    result.returncode == 0 and result.stdout.strip() == "ok"
+                )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            json.JSONDecodeError,
+            subprocess.TimeoutExpired,
+        ) as error:
+            self.process_probe_failed = True
+            self.add(
+                "quickshell-process",
+                "Runtime",
+                "Quickshell process",
+                "error",
+                "Check failed",
+                str(error),
+                "qs list --all --json",
+            )
+
+    def load_outputs(self) -> list[dict[str, Any]]:
+        fixture = os.environ.get("SHIBUMI_HEALTH_OUTPUT_FILE")
+        try:
+            if fixture:
+                values = read_json_list(Path(fixture))
+            else:
+                result = run(["hyprctl", "monitors", "-j"], timeout=4)
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr or result.stdout or "hyprctl failed")
+                values = json.loads(result.stdout)
+            return [item for item in values if isinstance(item, dict)]
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            json.JSONDecodeError,
+            subprocess.TimeoutExpired,
+        ) as error:
+            self.add(
+                "outputs",
+                "Runtime",
+                "Outputs",
+                "error",
+                "Unavailable",
+                str(error),
+                "hyprctl monitors -j",
+                "Confirm that the active Hyprland session is reachable.",
+            )
+            return []
+
+    def check_bar_and_outputs(self, outputs: list[dict[str, Any]]) -> None:
+        bar = self.config.get("bar") if isinstance(self.config.get("bar"), dict) else {}
+        configured_id = str(bar.get("id") or "omarchy.bar")
+        running = [
+            str(item.get("id") or "")
+            for item in self.registry
+            if item.get("active") is True and "bar" in (item.get("kinds") or [])
+        ]
+        running_id = running[0] if len(running) == 1 else ""
+        shell_style = self.shell_style
+        selected = "Omarchy" if configured_id == "omarchy.bar" else (
+            "Shibumi (form unknown)" if shell_style is None else (
+                "Shibumi V1" if shell_style == "shibumi" else "Shibumi V2"
+            )
+        )
+        running_label = "None" if not running else (
+            "Multiple" if len(running) > 1 else (
+                "Omarchy" if running_id == "omarchy.bar" else selected
+            )
+        )
+        matches = len(running) == 1 and running_id == configured_id
+        self.add(
+            "bar-runtime",
+            "Runtime",
+            "Active bar",
+            "ok" if matches else "error",
+            selected if matches else f"{selected} → {running_label}",
+            "Selection and runtime agree." if matches
+            else "The configured bar does not match the single active bar.",
+            self.config_path,
+            "Run the guarded bar handoff again." if not matches else "",
+        )
+
+        form = "Unknown" if shell_style is None else (
+            "Islands" if shell_style == "shibumi" else shell_style.title()
+        )
+        position = str(bar.get("position") or "top").title()
+        output_values = []
+        for output in outputs:
+            name = safe_text(output.get("name"), 48)
+            scale = output.get("scale")
+            output_values.append(f"{name} @{scale:g}×" if isinstance(scale, (int, float)) else name)
+        if outputs:
+            self.add(
+                "bar-geometry",
+                "Runtime",
+                "Bar geometry",
+                "ok",
+                f"{form} · {position} · {len(outputs)} output(s)",
+                ", ".join(output_values),
+                "hyprctl monitors -j",
+            )
+
+    def check_processes(self) -> None:
+        if self.process_probe_failed:
+            return
+        count = len(self.production_pids)
+        responsive = count == 1 and self.production_responsive
+        status = "ok" if responsive else "error"
+        if responsive:
+            value = "1 production process"
+            detail = (
+                f"PID {self.production_pids[0]} owns "
+                f"{self.omarchy_root}/shell and answers IPC."
+            )
+        elif count == 1:
+            value = "Production process unresponsive"
+            detail = (
+                f"PID {self.production_pids[0]} is registered for "
+                f"{self.omarchy_root}/shell but does not answer IPC."
+            )
+        else:
+            value = f"{count} production processes"
+            detail = (
+                "Expected exactly one live Quickshell instance registered for "
+                f"{self.omarchy_root}/shell/shell.qml."
+            )
+        self.add(
+            "quickshell-process",
+            "Runtime",
+            "Quickshell process",
+            status,
+            value,
+            detail,
+            "qs list --all --json",
+            "Inspect the registered instances before restarting the shell."
+            if status == "error" else "",
+        )
+
+    def check_plugins(self) -> None:
+        expected = [str(value) for value in self.state.get("plugins", [])]
+        if not expected:
+            return
+        expected_set = set(expected)
+        digests = self.state.get("pluginDigests")
+        digests = digests if isinstance(digests, dict) else {}
+        missing: list[str] = []
+        stale: list[str] = []
+        ownership: list[str] = []
+        for plugin_id in expected:
+            target = self.plugin_dir / plugin_id
+            if not target.is_dir() or target.is_symlink():
+                missing.append(plugin_id)
+                continue
+            marker_path = target / MANAGED_MARKER
+            try:
+                marker = read_json(marker_path)
+                expected_digest = str(digests.get(plugin_id) or "")
+                if (
+                    marker.get("suiteId") != SUITE_ID
+                    or marker.get("pluginId") != plugin_id
+                    or marker.get("payloadDigest") != expected_digest
+                ):
+                    ownership.append(plugin_id)
+                    continue
+                if payload_digest(target) != expected_digest:
+                    stale.append(plugin_id)
+            except (OSError, ValueError, json.JSONDecodeError):
+                ownership.append(plugin_id)
+        extra = sorted(
+            path.name
+            for path in self.plugin_dir.glob("hancore.shibumi.*")
+            if path.name not in expected_set
+        )
+        problems = missing + stale + ownership + extra
+        details = []
+        if missing:
+            details.append("missing: " + ", ".join(missing))
+        if stale:
+            details.append("modified/stale: " + ", ".join(stale))
+        if ownership:
+            details.append("ownership mismatch: " + ", ".join(ownership))
+        if extra:
+            details.append("unexpected roots: " + ", ".join(extra))
+        self.add(
+            "managed-plugins",
+            "Plugins",
+            "Shibumi plugins",
+            "error" if problems else "ok",
+            f"{len(expected) - len(missing)}/{len(expected)} installed",
+            "; ".join(details) if details else "Every managed payload matches its recorded digest.",
+            self.plugin_dir,
+            "Run shibumi-suite repair after reviewing the affected roots."
+            if problems else "",
+        )
+
+        registry = {
+            str(item.get("id") or ""): item for item in self.registry
+        }
+        absent = [plugin_id for plugin_id in expected if plugin_id not in registry]
+        activation = self.state.get("activation")
+        activation = activation if isinstance(activation, dict) else {}
+        layout = activation.get("layout")
+        layout = layout if isinstance(layout, dict) else {}
+        required_enabled = {
+            str(plugin_id)
+            for region in ("left", "center", "right")
+            for plugin_id in (
+                layout.get(region) if isinstance(layout.get(region), list) else []
+            )
+        }
+        active_bar = str(activation.get("activeBar") or "")
+        if active_bar:
+            required_enabled.add(active_bar)
+        enabled_services = activation.get("enableServices")
+        enabled_services = enabled_services if isinstance(enabled_services, list) else []
+        for plugin_id in enabled_services:
+            entry = registry.get(str(plugin_id), {})
+            kinds = entry.get("kinds") if isinstance(entry, dict) else []
+            kinds = kinds if isinstance(kinds, list) else []
+            # Quattro's enabled flag follows bar-widget placement for hybrid
+            # widget/services. The suite verifier therefore requires only
+            # pure services plus the configured layout and active bar.
+            if "bar-widget" not in kinds:
+                required_enabled.add(str(plugin_id))
+        required_enabled &= expected_set
+        disabled_required = [
+            plugin_id
+            for plugin_id in sorted(required_enabled)
+            if plugin_id in registry and registry[plugin_id].get("enabled") is not True
+        ]
+        configured_id = str(
+            (self.config.get("bar") or {}).get("id") or "omarchy.bar"
+        )
+        shibumi_running = configured_id != "omarchy.bar"
+        status = "error" if absent or (shibumi_running and disabled_required) else "ok"
+        detail = []
+        if absent:
+            detail.append("not discovered: " + ", ".join(absent))
+        if disabled_required:
+            detail.append("required but disabled: " + ", ".join(disabled_required))
+        if not detail:
+            detail.append("All expected roots are discovered and every runtime-required root is enabled.")
+        elif not shibumi_running and not absent:
+            detail.append("Disabled Shibumi roots are expected while Omarchy is active.")
+        self.add(
+            "plugin-activation",
+            "Plugins",
+            "Plugin activation",
+            status,
+            f"{len(required_enabled) - len(disabled_required)}/{len(required_enabled)} required enabled",
+            "; ".join(detail),
+            self.plugin_dir,
+            "Use the suite repair path; do not toggle suite roots individually."
+            if status == "error" else "",
+        )
+
+    def check_lifecycle(self) -> None:
+        transaction = self.state_dir / "switch-transaction"
+        status_path = self.state_dir / "switch-status.json"
+        if transaction.exists():
+            self.add(
+                "lifecycle",
+                "Runtime",
+                "Lifecycle state",
+                "error",
+                "Unfinished transaction",
+                "A guarded bar switch did not clean up its transaction directory.",
+                transaction,
+                "Run the continuity manager recovery before switching again.",
+            )
+            return
+        try:
+            value = read_json(status_path) if status_path.is_file() else {}
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            self.add(
+                "lifecycle",
+                "Runtime",
+                "Lifecycle state",
+                "warning",
+                "Status unreadable",
+                str(error),
+                status_path,
+            )
+            return
+        phase = str(value.get("phase") or "idle")
+        updated = int(value.get("updatedEpoch") or 0)
+        age = max(0, int(time.time()) - updated) if updated else 0
+        if phase == "error":
+            self.add(
+                "lifecycle",
+                "Runtime",
+                "Lifecycle state",
+                "error",
+                "Last switch failed",
+                value.get("detail") or "The continuity manager reported an error.",
+                status_path,
+                "Retry only after reviewing the recorded switch failure.",
+            )
+        elif phase in {"queued", "snapshot", "apply", "verify"}:
+            stale = age > 120
+            self.add(
+                "lifecycle",
+                "Runtime",
+                "Lifecycle state",
+                "error" if stale else "warning",
+                "Stale switch" if stale else f"Switch {phase}",
+                f"The last lifecycle update is {age} seconds old.",
+                status_path,
+                "Run continuity recovery before retrying." if stale else "Wait for verification to finish.",
+            )
+        else:
+            self.add(
+                "lifecycle",
+                "Runtime",
+                "Lifecycle state",
+                "ok",
+                "Settled",
+                f"Last recorded phase: {phase}.",
+                status_path if status_path.is_file() else self.state_dir,
+            )
+
+    def read_runtime_log(self) -> str:
+        instance_id = self.production_instance_id
+        if not INSTANCE_ID_PATTERN.fullmatch(instance_id):
+            raise ValueError("The production instance ID is missing or malformed.")
+        runtime_value = os.environ.get("XDG_RUNTIME_DIR", "")
+        runtime_root = Path(runtime_value)
+        if not runtime_value or not runtime_root.is_absolute() or str(runtime_root) != os.path.normpath(runtime_value):
+            raise ValueError("XDG_RUNTIME_DIR is missing or malformed.")
+
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        directory_fd = os.open("/", directory_flags)
+        try:
+            for component in runtime_root.parts[1:]:
+                child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = child_fd
+            root_stat = os.fstat(directory_fd)
+            if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != os.getuid():
+                raise ValueError("XDG_RUNTIME_DIR is not an owned directory.")
+            for component in ("quickshell", "by-id", instance_id):
+                child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = child_fd
+            log_fd = os.open(
+                "log.log",
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                dir_fd=directory_fd,
+            )
+            try:
+                metadata = os.fstat(log_fd)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise ValueError("The production text log is not a regular file.")
+                if metadata.st_uid != os.getuid():
+                    raise ValueError("The production text log has a foreign owner.")
+                offset = metadata.st_size - LOG_TAIL_BYTES if metadata.st_size > LOG_FULL_READ_LIMIT else 0
+                remaining = LOG_TAIL_BYTES if offset else min(metadata.st_size, LOG_FULL_READ_LIMIT)
+                os.lseek(log_fd, offset, os.SEEK_SET)
+                blocks = []
+                while remaining:
+                    block = os.read(log_fd, min(remaining, 64 * 1024))
+                    if not block:
+                        break
+                    blocks.append(block)
+                    remaining -= len(block)
+                raw = b"".join(blocks)
+                if offset:
+                    raw = raw.partition(b"\n")[2]
+                return raw.decode("utf-8", errors="replace")
+            finally:
+                os.close(log_fd)
+        finally:
+            os.close(directory_fd)
+
+    def check_logs(self) -> None:
+        try:
+            if self.process_probe_failed or len(self.production_pids) != 1:
+                if self.process_probe_failed:
+                    detail = "The production process selection failed, so its log was not queried."
+                elif not self.production_pids:
+                    detail = "No exact production process was available for the log query."
+                else:
+                    detail = "Multiple production processes made log ownership ambiguous."
+                self.add(
+                    "runtime-errors",
+                    "Runtime",
+                    "Recent runtime findings",
+                    "warning",
+                    "Log unavailable",
+                    detail,
+                    "current Quickshell configuration",
+                    "Resolve production process ownership, then run Health again.",
+                    owner=OWNER_UNKNOWN,
+                )
+                return
+            raw = self.read_runtime_log()
+            returned_lines = raw.splitlines()
+            if not returned_lines or not any(line.strip() for line in returned_lines):
+                self.add(
+                    "runtime-errors",
+                    "Runtime",
+                    "Recent runtime findings",
+                    "warning",
+                    "Log unavailable",
+                    "The production log query returned an empty sample.",
+                    "current Quickshell configuration",
+                    "Confirm the selected process is logging, then run Health again.",
+                    owner=OWNER_UNKNOWN,
+                )
+                return
+            lines = returned_lines[-LOG_TAIL_LINES:]
+            reload_found = False
+            for index in range(len(lines) - 1, -1, -1):
+                if "Configuration Loaded" in lines[index]:
+                    lines = lines[index + 1 :]
+                    reload_found = True
+                    break
+            if reload_found:
+                sample_scope = (
+                    f"Sample: {len(lines)} line(s) after the latest reload marker "
+                    f"within the on-demand {LOG_TAIL_LINES}-line tail."
+                )
+            else:
+                sample_scope = (
+                    f"Sample: {len(lines)} line(s) from the on-demand "
+                    f"{LOG_TAIL_LINES}-line tail; the reload boundary was not present."
+                )
+            rate_scope = (
+                "Boot/hour rate: unavailable because this bounded sample does not "
+                "prove a complete boot or one-hour observation window."
+            )
+            error_matches: list[tuple[str, dict[str, str]]] = []
+            warning_matches: list[tuple[str, dict[str, str]]] = []
+            suppressed_sensitive = False
+            for line in lines:
+                is_error = bool(ERROR_PATTERNS.search(line))
+                is_warning = bool(WARNING_PATTERN.search(line))
+                if not is_error and not is_warning:
+                    continue
+                if SENSITIVE_PATTERNS.search(line):
+                    suppressed_sensitive = True
+                    continue
+                attribution = self.attribute_source(line)
+                match = (safe_text(self.redact_home_paths(line), 280), attribution)
+                if is_error:
+                    error_matches.append(match)
+                else:
+                    warning_matches.append(match)
+            error_matches = error_matches[-LOG_DETAIL_FINDINGS:]
+            if suppressed_sensitive:
+                self.add(
+                    "runtime-errors-sensitive",
+                    "Runtime",
+                    "Sensitive runtime findings",
+                    "warning",
+                    "Details redacted",
+                    "One or more relevant runtime findings contained sensitive terms and were omitted from the Health report.",
+                    "current Quickshell configuration",
+                    "Review the local shell log using a trusted terminal; Health will not expose the sensitive detail.",
+                    owner=OWNER_UNKNOWN,
+                )
+            if not error_matches and not warning_matches and not suppressed_sensitive:
+                self.add(
+                    "runtime-errors",
+                    "Runtime",
+                    "Recent runtime errors",
+                    "ok",
+                    "None detected",
+                    "No matching loader, type, reference, binding-loop, assignment, or provider failure was found in the bounded log sample.",
+                    "current Quickshell configuration",
+                    owner=OWNER_UNKNOWN,
+                )
+
+            grouped_errors: dict[str, list[tuple[str, dict[str, str]]]] = {}
+            for match in error_matches:
+                grouped_errors.setdefault(match[1]["owner"], []).append(match)
+            for owner in sorted(grouped_errors, key=lambda item: OWNER_ORDER[item]):
+                findings = grouped_errors[owner]
+                plugin_ids = sorted({item["pluginId"] for _, item in findings if item["pluginId"]})
+                source_paths = sorted({item["sourcePath"] for _, item in findings if item["sourcePath"]})
+                if owner == OWNER_SHIBUMI:
+                    check_id = "runtime-errors"
+                    label = "Recent Shibumi runtime errors"
+                    action = "Copy the sanitized report or prepare a Shibumi issue draft for review."
+                elif owner == OWNER_OMARCHY:
+                    check_id = "runtime-errors-omarchy"
+                    label = "Omarchy runtime errors"
+                    action = "Inspect the Omarchy source or report this finding upstream; Shibumi cannot file it."
+                elif owner == OWNER_THIRD_PARTY:
+                    check_id = "runtime-errors-third-party"
+                    label = "Third-party runtime errors"
+                    action = "Inspect the named third-party plugin and use its upstream support channel; Shibumi cannot file it."
+                else:
+                    check_id = "runtime-errors" if len(grouped_errors) == 1 else "runtime-errors-unknown"
+                    label = "Recent runtime errors" if len(grouped_errors) == 1 else "Unattributed runtime errors"
+                    action = "Confirm the source before assigning ownership; Shibumi will not file an unattributed issue."
+                self.add(
+                    check_id,
+                    "Runtime",
+                    label,
+                    "error",
+                    f"{len(findings)} relevant error(s)",
+                    " | ".join(line for line, _ in findings),
+                    "; ".join(plugin_ids) or "current Quickshell configuration",
+                    action,
+                    owner=owner,
+                    source_path="; ".join(source_paths),
+                    plugin_id="; ".join(plugin_ids),
+                    issue_eligible=owner == OWNER_SHIBUMI,
+                )
+
+            grouped_warnings: dict[str, list[tuple[str, dict[str, str]]]] = {}
+            for match in warning_matches:
+                grouped_warnings.setdefault(match[1]["owner"], []).append(match)
+            for owner in sorted(grouped_warnings, key=lambda item: OWNER_ORDER[item]):
+                findings = grouped_warnings[owner]
+                visible = findings[-LOG_DETAIL_FINDINGS:]
+                plugin_ids = sorted({item["pluginId"] for _, item in findings if item["pluginId"]})
+                source_paths = sorted({item["sourcePath"] for _, item in findings if item["sourcePath"]})
+                if owner == OWNER_SHIBUMI:
+                    check_id = "runtime-warnings"
+                    label = "Recent Shibumi runtime warnings"
+                    action = "Review the bounded warning sample before deciding whether action is needed."
+                elif owner == OWNER_OMARCHY:
+                    check_id = "runtime-warnings-omarchy"
+                    label = "Omarchy runtime warnings"
+                    action = "Inspect the Omarchy source or its upstream support path if the warning persists."
+                elif owner == OWNER_THIRD_PARTY:
+                    check_id = "runtime-warnings-third-party"
+                    label = "Third-party runtime warnings"
+                    action = "Inspect the named third-party plugin and use its upstream support channel if needed."
+                else:
+                    check_id = "runtime-warnings" if len(grouped_warnings) == 1 else "runtime-warnings-unknown"
+                    label = "Recent runtime warnings" if len(grouped_warnings) == 1 else "Unattributed runtime warnings"
+                    action = "Confirm the source before assigning ownership; this warning is not attributed to Shibumi."
+                evidence = " | ".join(line for line, _ in visible)
+                omitted = len(findings) - len(visible)
+                if omitted:
+                    evidence = f"{omitted} earlier matching warning(s) omitted. " + evidence
+                self.add(
+                    check_id,
+                    "Runtime",
+                    label,
+                    "warning",
+                    f"{len(findings)} warning(s) in {len(lines)} sampled line(s)",
+                    f"{sample_scope} {rate_scope} Evidence: {evidence}",
+                    "; ".join(plugin_ids) or "current Quickshell configuration",
+                    action,
+                    owner=owner,
+                    source_path="; ".join(source_paths),
+                    plugin_id="; ".join(plugin_ids),
+                )
+        except (OSError, ValueError, AttributeError) as error:
+            self.add(
+                "runtime-errors",
+                "Runtime",
+                "Recent runtime findings",
+                "warning",
+                "Log unavailable",
+                str(error),
+                "current Quickshell configuration",
+                owner=OWNER_UNKNOWN,
+            )
+
+    def source_root(self) -> Path:
+        override = os.environ.get("SHIBUMI_HEALTH_SOURCE_ROOT")
+        recorded = self.state.get("sourceRoot")
+        return Path(override or recorded or self.home / "Projects/shibumi")
+
+    def install_origin(self) -> str:
+        if not self.state:
+            return "unknown"
+        return str(self.state.get("installOrigin") or "checkout")
+
+    def git(self, root: Path, arguments: list[str], timeout: float = 5) -> str:
+        result = run(["git", "-C", str(root), *arguments], timeout=timeout)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git failed")
+        return result.stdout.strip()
+
+    def release_tags(self, root: Path, *, points_at_head: bool = False) -> list[str]:
+        arguments = ["tag"]
+        if points_at_head:
+            arguments.extend(["--points-at", "HEAD"])
+        arguments.extend(["--list", "v*"])
+        return self.git(root, arguments).splitlines()
+
+    def check_release_source(self, root: Path, tag: str, commit: str) -> None:
+        dirty_lines = self.git(
+            root, ["status", "--porcelain=v1", "--untracked-files=normal"]
+        ).splitlines()
+        dirty = bool(dirty_lines)
+        self.add(
+            "source-status",
+            "Source",
+            "Release checkout",
+            "warning" if dirty else "ok",
+            f"{tag} · {'dirty' if dirty else 'clean'}",
+            f"{tag} · {commit[:10]}",
+            root,
+            "Review local changes before updating." if dirty else "",
+        )
+        if not self.fetch:
+            self.add(
+                "source-update",
+                "Source",
+                "Update check",
+                "info",
+                "Not checked",
+                "Remote refs were not contacted during this local health run.",
+                root,
+                "Use Check for updates for a manual read-only fetch.",
+            )
+            return
+
+        try:
+            self.git(
+                root,
+                ["fetch", "--tags", "--quiet", "origin"],
+                timeout=configured_timeout("SHIBUMI_HEALTH_FETCH_TIMEOUT", 12),
+            )
+            latest = latest_release_tag(self.release_tags(root))
+            if latest is None:
+                raise RuntimeError("no valid release tags were found after fetch")
+            if version_key(latest[1:]) > version_key(tag[1:]):
+                status, value = "warning", f"Update available · {latest}"
+                action = "Review the newer release before updating."
+            else:
+                status, value = "ok", "Current"
+                action = ""
+            self.add(
+                "source-update",
+                "Source",
+                "Update check",
+                status,
+                value,
+                f"Checked release tags from origin; current checkout is {tag}.",
+                root,
+                action,
+            )
+        except (RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            self.add(
+                "source-update",
+                "Source",
+                "Update check",
+                "warning",
+                "Check failed",
+                safe_text(str(error).splitlines()[-1], 280),
+                root,
+                "Grant this machine read access to the remote, then retry.",
+            )
+
+    def check_source(self) -> None:
+        root = self.source_root()
+        if not (root / ".git").exists():
+            self.add(
+                "source-status",
+                "Source",
+                "Development checkout",
+                "warning",
+                "Metadata unavailable",
+                "The recorded development source is not a Git checkout.",
+                root,
+                "Use a real checkout so branch and upstream state are verifiable.",
+            )
+            return
+        fetch_detail = ""
+        try:
+            branch = self.git(root, ["branch", "--show-current"])
+            commit = self.git(root, ["rev-parse", "HEAD"])
+            if not branch:
+                try:
+                    tag = latest_release_tag(
+                        self.release_tags(root, points_at_head=True)
+                    )
+                except (RuntimeError, subprocess.TimeoutExpired):
+                    tag = None
+                if tag is not None:
+                    self.check_release_source(root, tag, commit)
+                    return
+
+            upstream_name = self.git(root, ["rev-parse", "--abbrev-ref", "@{upstream}"])
+            if self.fetch:
+                if "/" not in upstream_name:
+                    raise RuntimeError("configured upstream has no remote")
+                remote, remote_branch = upstream_name.split("/", 1)
+                try:
+                    self.git(
+                        root,
+                        [
+                            "fetch",
+                            "--no-tags",
+                            "--quiet",
+                            remote,
+                            f"refs/heads/{remote_branch}:refs/remotes/{upstream_name}",
+                        ],
+                        timeout=configured_timeout(
+                            "SHIBUMI_HEALTH_FETCH_TIMEOUT", 12
+                        ),
+                    )
+                    fetch_detail = "Remote refs refreshed."
+                    self.add(
+                        "source-update",
+                        "Source",
+                        "Update check",
+                        "ok",
+                        "Completed",
+                        fetch_detail,
+                        root,
+                    )
+                except (RuntimeError, subprocess.TimeoutExpired) as error:
+                    self.add(
+                        "source-update",
+                        "Source",
+                        "Update check",
+                        "warning",
+                        "Check failed",
+                        safe_text(str(error).splitlines()[-1], 280),
+                        root,
+                        "Grant this machine read access to the private remote, then retry.",
+                    )
+            upstream = self.git(root, ["rev-parse", "@{upstream}"])
+            dirty_lines = self.git(
+                root, ["status", "--porcelain=v1", "--untracked-files=normal"]
+            ).splitlines()
+            counts = self.git(
+                root, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]
+            ).split()
+            ahead, behind = (int(counts[0]), int(counts[1]))
+            relation = "Current"
+            status = "ok"
+            if ahead and behind:
+                relation, status = "Diverged", "error"
+            elif behind:
+                relation, status = "Update available", "warning"
+            elif ahead:
+                relation, status = f"Ahead {ahead}", "warning"
+            elif dirty_lines:
+                status = "warning"
+            detail = (
+                f"{branch} · {commit[:10]} · upstream {upstream[:10]} · "
+                f"ahead {ahead}, behind {behind}. {fetch_detail}"
+            ).strip()
+            self.add(
+                "source-status",
+                "Source",
+                "Development checkout",
+                status,
+                f"{relation} · {'dirty' if dirty_lines else 'clean'}",
+                detail,
+                root,
+                "Review local changes before updating." if dirty_lines or ahead or behind else "",
+            )
+            if not self.fetch:
+                self.add(
+                    "source-update",
+                    "Source",
+                    "Update check",
+                    "info",
+                    "Not checked",
+                    "Remote refs were not contacted during this local health run.",
+                    root,
+                    "Use Check for updates for a manual read-only fetch.",
+                )
+        except (RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            self.add(
+                "source-status",
+                "Source",
+                "Development checkout",
+                "warning",
+                "Check failed",
+                safe_text(str(error).splitlines()[-1], 280),
+                root,
+                "Confirm the branch has a configured upstream.",
+            )
+
+    def package_fixture(self) -> dict[str, Any] | None:
+        path = os.environ.get("SHIBUMI_HEALTH_PACKAGE_FILE")
+        return read_json(Path(path)) if path else None
+
+    def installed_package_version(
+        self, fixture: dict[str, Any] | None
+    ) -> str:
+        if fixture is not None:
+            value = fixture.get("installedVersion")
+            return str(value).strip() if isinstance(value, str) else ""
+        result = run(["pacman", "-Q", PACKAGE_NAME], timeout=3)
+        if result.returncode != 0:
+            return ""
+        fields = result.stdout.strip().split(maxsplit=1)
+        return fields[1] if len(fields) == 2 and fields[0] == PACKAGE_NAME else ""
+
+    @staticmethod
+    def package_payload_version(value: str) -> str:
+        return value.rsplit("-", 1)[0] if "-" in value else value
+
+    @staticmethod
+    def arch_payload_version(value: str) -> str:
+        return value.replace("-", "")
+
+    @staticmethod
+    def compare_arch_versions(installed: str, available: str) -> int | None:
+        try:
+            result = run(["vercmp", available, installed], timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            return 0 if available == installed else None
+        if result.returncode != 0:
+            return 0 if available == installed else None
+        try:
+            return int(result.stdout.strip())
+        except ValueError:
+            return 0 if available == installed else None
+
+    def available_package_version(
+        self, fixture: dict[str, Any] | None
+    ) -> str | None:
+        if fixture is not None:
+            error = fixture.get("fetchError")
+            if isinstance(error, str) and error.strip():
+                raise RuntimeError(error.strip())
+            value = fixture.get("availableVersion")
+            return str(value).strip() if isinstance(value, str) and value.strip() else None
+        timeout = configured_timeout("SHIBUMI_HEALTH_AUR_TIMEOUT", 8)
+        result = run(
+            [
+                "curl",
+                "-fsSL",
+                "--max-time",
+                str(timeout),
+                AUR_INFO_URL,
+            ],
+            timeout=timeout + 1,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                result.stderr.strip() or result.stdout.strip() or "AUR RPC failed"
+            )
+        response = json.loads(result.stdout)
+        if (
+            not isinstance(response, dict)
+            or response.get("type") not in ("multiinfo", "info")
+            or not isinstance(response.get("results"), list)
+        ):
+            raise ValueError("AUR RPC returned an unsupported response")
+        for item in response["results"]:
+            if isinstance(item, dict) and item.get("Name") == PACKAGE_NAME:
+                version = item.get("Version")
+                if isinstance(version, str) and version.strip():
+                    return version.strip()
+        return None
+
+    def check_package(self) -> None:
+        fixture: dict[str, Any] | None = None
+        try:
+            fixture = self.package_fixture()
+            installed = self.installed_package_version(fixture)
+        except (
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+            subprocess.TimeoutExpired,
+        ) as error:
+            self.add(
+                "package-status",
+                "Package",
+                "Arch package",
+                "error",
+                "Check failed",
+                str(error),
+                PACKAGE_NAME,
+                "Confirm that pacman can read the local package database.",
+            )
+            return
+
+        staged = str(self.state.get("packageVersion") or "")
+        expected = self.arch_payload_version(staged)
+        installed_payload = self.package_payload_version(installed)
+        if not installed:
+            self.add(
+                "package-status",
+                "Package",
+                "Arch package",
+                "error",
+                "Not installed",
+                "User plugins are staged from a package that pacman no longer owns.",
+                PACKAGE_NAME,
+                "Reinstall shibumi-shell, then run shibumi-shell repair --yes.",
+            )
+        elif installed_payload != expected:
+            self.add(
+                "package-status",
+                "Package",
+                "Package staging",
+                "warning",
+                f"{installed} installed · {staged} staged",
+                "The system package and the user-staged plugin suite differ.",
+                self.state_dir / "install.json",
+                "Run shibumi-shell update --yes; add --allow-downgrade only "
+                "after intentionally installing an older package.",
+            )
+        else:
+            self.add(
+                "package-status",
+                "Package",
+                "Arch package",
+                "ok",
+                installed,
+                f"The staged suite matches package payload {staged}.",
+                PACKAGE_NAME,
+            )
+
+        if not self.fetch:
+            self.add(
+                "package-update",
+                "Package",
+                "AUR update check",
+                "info",
+                "Not checked",
+                "The AUR was not contacted during this local health run.",
+                PACKAGE_NAME,
+                "Use Check for updates to query the AUR manually.",
+            )
+            return
+        try:
+            available = self.available_package_version(fixture)
+            if available is None:
+                self.add(
+                    "package-update",
+                    "Package",
+                    "AUR update check",
+                    "info",
+                    "Not published",
+                    "No shibumi-shell package is currently registered in the AUR.",
+                    PACKAGE_NAME,
+                )
+                return
+            comparison = self.compare_arch_versions(installed, available)
+            if not installed:
+                status, value = "warning", f"AUR {available} available"
+            elif comparison is not None and comparison > 0:
+                status, value = "warning", f"Update available · {available}"
+            elif comparison is not None and comparison < 0:
+                status, value = "info", f"Installed newer · {available}"
+            elif comparison == 0:
+                status, value = "ok", f"Current · {available}"
+            else:
+                status, value = "warning", f"Version differs · {available}"
+            self.add(
+                "package-update",
+                "Package",
+                "AUR update check",
+                status,
+                value,
+                f"Installed package: {installed or 'none'}.",
+                PACKAGE_NAME,
+                "Use Omarchy's package update flow, then run shibumi-shell update --yes."
+                if status == "warning" else "",
+            )
+        except (
+            OSError,
+            RuntimeError,
+            ValueError,
+            json.JSONDecodeError,
+            subprocess.TimeoutExpired,
+        ) as error:
+            self.add(
+                "package-update",
+                "Package",
+                "AUR update check",
+                "warning",
+                "Check failed",
+                safe_text(str(error).splitlines()[-1], 280),
+                PACKAGE_NAME,
+                "Check the network connection and retry manually.",
+            )
+
+    def check_versions(self) -> None:
+        values = []
+        # Stable Omarchy is authoritative for release baselines. Keep the
+        # development package as a diagnostic-only fallback for engineering
+        # hosts that intentionally provide omarchy-dev instead.
+        for package_group in (
+            ("omarchy", "omarchy-dev"),
+            ("quickshell", "quickshell-git"),
+        ):
+            for package in package_group:
+                try:
+                    result = run(["pacman", "-Q", package], timeout=3)
+                    if result.returncode == 0:
+                        fields = result.stdout.strip().split(maxsplit=1)
+                        if len(fields) == 2:
+                            values.append(fields[1])
+                            break
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        suite = safe_text(self.state.get("suiteVersion") or "unknown", 40)
+        detail = "Omarchy · Quickshell" if len(values) == 2 else "Package metadata is partial."
+        self.add(
+            "versions",
+            "Metadata",
+            "Versions",
+            "info",
+            " · ".join([suite, *values]) if values else suite,
+            detail,
+            self.state_dir / "install.json",
+        )
+
+    def result(self) -> dict[str, Any]:
+        self.load_state_and_config()
+        self.load_registry()
+        self.load_processes()
+        outputs = self.load_outputs()
+        self.check_bar_and_outputs(outputs)
+        self.check_processes()
+        self.check_plugins()
+        self.check_lifecycle()
+        self.check_logs()
+        if self.install_origin() == "package":
+            self.check_package()
+        elif self.install_origin() == "checkout":
+            self.check_source()
+        self.check_versions()
+        self.checks.sort(key=lambda item: (STATUS_ORDER[item.status], item.group, item.label))
+        errors = sum(check.status == "error" for check in self.checks)
+        warnings = sum(check.status == "warning" for check in self.checks)
+        passed = sum(check.status == "ok" for check in self.checks)
+        overall = "error" if errors else "warning" if warnings else "healthy"
+        if errors:
+            summary = f"{errors} error(s), {warnings} warning(s)"
+        elif warnings:
+            summary = f"{warnings} warning(s), {passed} checks passed"
+        else:
+            summary = f"All {passed} checks passed"
+        return {
+            "schemaVersion": 1,
+            "generatedEpoch": int(time.time()),
+            "overall": overall,
+            "summary": summary,
+            "fetchRequested": self.fetch,
+            "installOrigin": self.install_origin(),
+            "suiteVersion": str(self.state.get("suiteVersion") or "unknown"),
+            "packageName": str(self.state.get("packageName") or ""),
+            "packageVersion": str(self.state.get("packageVersion") or ""),
+            "checks": [asdict(check) for check in self.checks],
+        }
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(prog="shibumi-health")
+    result.add_argument(
+        "--fetch",
+        action="store_true",
+        help="check the applicable Git upstream or AUR package for updates",
+    )
+    return result
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        payload = Probe(fetch=args.fetch).result()
+    except Exception as error:  # A health surface must fail as structured data.
+        payload = {
+            "schemaVersion": 1,
+            "generatedEpoch": int(time.time()),
+            "overall": "error",
+            "summary": "Health runner failed",
+            "fetchRequested": args.fetch,
+            "installOrigin": "unknown",
+            "suiteVersion": "unknown",
+            "packageName": "",
+            "packageVersion": "",
+            "checks": [
+                asdict(
+                    Check(
+                        "health-runner",
+                        "Runtime",
+                        "Health runner",
+                        "error",
+                        "Failed",
+                        safe_public_text(error, 500),
+                    )
+                )
+            ],
+        }
+    print(json.dumps(payload, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,10 @@
+{
+  "payloadDigest": "b16048781c3c119a8ccac925973c5773fc365c8a474e9f09d043812c6a34b4dc",
+  "pluginId": "hancore.shibumi.cpu",
+  "schemaVersion": 1,
+  "sourceRevision": "bd1224ba92fbf279666abe362ff5cf7a165da096",
+  "suiteId": "hancore.shibumi",
+  "suitePayloadDigest": "79c61d5e048c669c9eb27ebaad21987327892089daea501d0cf4185150a26f9e",
+  "suiteVersion": "0.1.1-beta.16.2",
+  "transaction": "1791561209-160411-cc55d57f"
+}

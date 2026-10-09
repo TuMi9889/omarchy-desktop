@@ -1,0 +1,10 @@
+{
+  "payloadDigest": "438a2e0fda3f38958fd8fb584520f6087376bef3a5cc21a26b699514b5791a4a",
+  "pluginId": "hancore.shibumi.bluetooth",
+  "schemaVersion": 1,
+  "sourceRevision": "bd1224ba92fbf279666abe362ff5cf7a165da096",
+  "suiteId": "hancore.shibumi",
+  "suitePayloadDigest": "79c61d5e048c669c9eb27ebaad21987327892089daea501d0cf4185150a26f9e",
+  "suiteVersion": "0.1.1-beta.16.2",
+  "transaction": "1791561209-160411-cc55d57f"
+}

@@ -1,0 +1,27 @@
+diff --git c/DockSettings.js w/DockSettings.js
+index 3e45390..c3b3a1a 100644
+--- c/DockSettings.js
++++ w/DockSettings.js
+@@ -76,7 +76,8 @@ function shouldSlideOut(visibilityMode, visibilityOverride, dockActive, workspac
+     var mode = normalizeVisibilityMode(visibilityMode, false)
+     if (mode === VISIBILITY_ALWAYS) return false
+     if (mode === VISIBILITY_KEYBIND) return true
+-    return dockActive !== true && workspaceEmpty !== true
++    // 本机修改：hover 模式一律隐藏，只在鼠标靠近／操作 Dock 时显示（不再因工作区空着而显示）。
++    return dockActive !== true
+ }
+ 
+ // Whether the keyboard shortcut may toggle the dock. Everything but "hover"
+diff --git c/scripts/dock-minimize.py w/scripts/dock-minimize.py
+index 297f7fc..a354358 100755
+--- c/scripts/dock-minimize.py
++++ w/scripts/dock-minimize.py
+@@ -224,7 +224,7 @@ def close_any_special(sock_path):
+             sw_name = str(sw.get("name", ""))
+             if sw_name and sw_name != "":
+                 clean_name = sw_name.replace("special:", "")
+-                hypr_cmd(sock_path, f'dispatch hl.dsp.workspace.toggle_special({{ workspace = "{clean_name}" }})')
++                hypr_cmd(sock_path, f'dispatch hl.dsp.workspace.toggle_special("{clean_name}")')
+     except Exception:
+         pass
+ 

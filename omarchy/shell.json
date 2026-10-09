@@ -1,0 +1,429 @@
+{
+  "bar": {
+    "centerAnchor": "hancore.shibumi.center",
+    "id": "hancore.shibumi.bar",
+    "layout": {
+      "center": [
+        {
+          "id": "hancore.shibumi.center"
+        },
+        {
+          "id": "nille.steam-sniper"
+        },
+        {
+          "id": "omaplug"
+        }
+      ],
+      "left": [
+        {
+          "id": "hancore.shibumi.control-center"
+        },
+        {
+          "id": "hancore.shibumi.workspaces"
+        },
+        {
+          "id": "hancore.shibumi.status"
+        },
+        {
+          "id": "hancore.shibumi.memory"
+        },
+        {
+          "id": "hancore.shibumi.cpu"
+        },
+        {
+          "id": "hancore.shibumi.audio"
+        },
+        {
+          "id": "hancore.shibumi.ai"
+        }
+      ],
+      "right": [
+        {
+          "id": "hancore.shibumi.media"
+        },
+        {
+          "id": "hancore.shibumi.quick-access"
+        },
+        {
+          "id": "hancore.shibumi.network"
+        },
+        {
+          "id": "hancore.shibumi.power-profile"
+        },
+        {
+          "id": "hancore.shibumi.battery"
+        },
+        {
+          "id": "hancore.shibumi.brightness"
+        },
+        {
+          "id": "hancore.shibumi.bluetooth"
+        },
+        {
+          "id": "hancore.shibumi.temperature"
+        },
+        {
+          "id": "hancore.shibumi.storage"
+        },
+        {
+          "id": "hancore.shibumi.gpu",
+          "shibumiModule": true
+        },
+        {
+          "id": "omarchy.tailscale"
+        },
+        {
+          "id": "rosakodu.dock"
+        }
+      ]
+    },
+    "position": "top",
+    "style": "shibumi",
+    "transparent": false
+  },
+  "disabledPlugins": [
+    "omarchy.battery",
+    "omarchy.nightlight",
+    "omarchy.background",
+    "omarchy.clipboard"
+  ],
+  "idle": {
+    "lock": 300,
+    "screensaver": 150
+  },
+  "plugins": [
+    {
+      "id": "bobbynicholas.omaland"
+    },
+    {
+      "id": "hancore.shibumi.state",
+      "shibumi": {
+        "identityVersion": 3,
+        "launcher": {
+          "icon": "grid",
+          "mode": "icon",
+          "text": "arch"
+        },
+        "layoutProtection": {
+          "v1": false,
+          "v2": false
+        },
+        "order": {
+          "center": [
+            "G8"
+          ],
+          "left": [
+            "G1",
+            "G2",
+            "G12",
+            "G13",
+            "G6",
+            "G10",
+            "G3"
+          ],
+          "right": [
+            "G9",
+            "G14",
+            "G7",
+            "G:hancore.shibumi.gpu",
+            "G4",
+            "G5",
+            "G15",
+            "G11"
+          ]
+        },
+        "picker": {
+          "imageStyle": "omarchy",
+          "mediaStyle": "carousel",
+          "style": "carousel"
+        },
+        "plugins": {
+          "favorites": [
+            "hancore.shibumi.quick-access",
+            "hancore.shibumi.workspaces",
+            "hancore.shibumi.power-profile",
+            "hancore.shibumi.memory",
+            "hancore.shibumi.cpu",
+            "hancore.shibumi.control-center",
+            "hancore.shibumi.gpu",
+            "hancore.shibumi.network",
+            "hancore.shibumi.center",
+            "hancore.shibumi.brightness",
+            "hancore.shibumi.battery",
+            "hancore.shibumi.bluetooth",
+            "hancore.shibumi.audio",
+            "hancore.shibumi.ai"
+          ]
+        },
+        "presentation": {
+          "accent": "color05",
+          "border": true,
+          "frost": true,
+          "panelBorder": true,
+          "radius": "small",
+          "shadow": false,
+          "shellStyle": "shibumi",
+          "v1Border": false,
+          "v2Border": true,
+          "v2ShellStyle": "notch"
+        },
+        "reactor": {
+          "mode": 3
+        },
+        "splits": {
+          "boundaries": [
+            false,
+            true
+          ],
+          "center": [],
+          "left": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+          ],
+          "right": [
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            false
+          ]
+        },
+        "v1SlotRoles": {
+          "center": [
+            "base"
+          ],
+          "left": [
+            "base",
+            "base",
+            "base",
+            "base",
+            "base",
+            "base",
+            "base"
+          ],
+          "right": [
+            "base",
+            "base",
+            "base",
+            "base",
+            "base",
+            "base",
+            "base",
+            "extra"
+          ]
+        },
+        "v2Boundaries": [
+          false,
+          false
+        ],
+        "v2Layout": {
+          "center": [
+            "G8"
+          ],
+          "left": [
+            "G1",
+            "G2",
+            "G3",
+            "",
+            "G5",
+            "G6",
+            "G4",
+            "G7",
+            "",
+            ""
+          ],
+          "right": [
+            "G9",
+            "G10",
+            "G11",
+            "G14",
+            "G12",
+            "G13",
+            "G16",
+            "G18",
+            "G17",
+            "G15",
+            "",
+            "",
+            ""
+          ]
+        },
+        "version": 1,
+        "widgets": {
+          "G10": {
+            "enabledV1": true
+          },
+          "G11": {
+            "enabledV1": true,
+            "enabledV2": true
+          },
+          "G12": {
+            "enabledV1": false,
+            "enabledV2": true
+          },
+          "G14": {
+            "enabled": false,
+            "enabledV1": false,
+            "enabledV2": false,
+            "appearance": {
+              "v2": {
+                "color": "inherit",
+                "displayMode": "full",
+                "compact": false,
+                "mediaStyle": "default",
+                "colorMode": "fill",
+                "tone": "auto",
+                "widgetBorder": false,
+                "widgetBorderWidth": 1,
+                "widgetBorderColor": "inherit",
+                "widgetBorderUsesSurfaceColor": false,
+                "widgetPadding": "auto",
+                "widgetRadius": "auto",
+                "surfaceOpacity": 1,
+                "batteryOrientation": "horizontal"
+              }
+            }
+          },
+          "G15": {
+            "enabled": false,
+            "enabledV1": true,
+            "enabledV2": true
+          },
+          "G16": {
+            "source": "cpu",
+            "unit": "metric",
+            "enabledV2": true
+          },
+          "G3": {
+            "enabledV1": true,
+            "enabledV2": true,
+            "omarchy.tray": {
+              "pinned": [],
+              "hidden": []
+            }
+          },
+          "G7": {
+            "enabled": false,
+            "enabledV1": true,
+            "enabledV2": true
+          },
+          "G9": {
+            "enabledV1": false,
+            "enabledV2": false
+          },
+          "G:hancore.shibumi.gpu": {
+            "enabledV1": true
+          },
+          "G18": {
+            "enabledV2": false,
+            "appearance": {
+              "v2": {
+                "colorMode": "fill",
+                "widgetBorder": false,
+                "displayMode": "full",
+                "compact": false,
+                "mediaStyle": "default",
+                "color": "inherit",
+                "tone": "auto",
+                "widgetBorderWidth": 1,
+                "widgetBorderColor": "inherit",
+                "widgetBorderUsesSurfaceColor": false,
+                "widgetPadding": "auto",
+                "widgetRadius": "auto",
+                "surfaceOpacity": 1,
+                "batteryOrientation": "horizontal"
+              }
+            }
+          },
+          "G8": {
+            "enabledV2": true
+          },
+          "G2": {
+            "appearance": {
+              "v1": {
+                "surfaceOpacity": 1,
+                "color": "inherit",
+                "tone": "auto"
+              },
+              "v2": {
+                "colorMode": "both",
+                "widgetBorder": true,
+                "color": "inherit",
+                "widgetBorderColor": "foreground",
+                "widgetBorderUsesSurfaceColor": false,
+                "tone": "auto",
+                "displayMode": "full",
+                "compact": false,
+                "widgetRadius": "auto",
+                "widgetPadding": "auto"
+              }
+            },
+            "enabledV1": true,
+            "enabledV2": true
+          },
+          "G:onlyvishesh.power-manager": {
+            "separator": true
+          },
+          "G1": {
+            "appearance": {
+              "v2": {
+                "color": "color01",
+                "widgetPadding": "auto",
+                "widgetRadius": "auto",
+                "tone": "auto",
+                "colorMode": "both",
+                "widgetBorder": true,
+                "widgetBorderColor": "foreground",
+                "widgetBorderUsesSurfaceColor": false
+              }
+            }
+          },
+          "G5": {
+            "appearance": {
+              "v2": {
+                "colorMode": "both",
+                "widgetBorder": true,
+                "color": "color01",
+                "widgetBorderColor": "foreground",
+                "widgetBorderUsesSurfaceColor": false,
+                "displayMode": "full",
+                "compact": false
+              }
+            }
+          }
+        },
+        "workspace": {
+          "mode": "5",
+          "style": "pacman",
+          "version": 1
+        }
+      },
+      "shibumiStateSchemaVersion": 1
+    },
+    {
+      "id": "hancore.shibumi.reactor"
+    },
+    {
+      "id": "hancore.shibumi.telemetry"
+    },
+    {
+      "id": "hancore.shibumi.power-state"
+    },
+    {
+      "id": "hancore.shibumi.update-center"
+    },
+    {
+      "id": "mirador"
+    },
+    {
+      "id": "vbrosseau.alttab"
+    }
+  ],
+  "version": 1
+}
