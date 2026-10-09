@@ -63,3 +63,7 @@ hl.config({ input = { kb_options = "compose:caps" } })
 -- Click-to-focus like Windows 11: hovering a window no longer steals keyboard
 -- focus. Mode 2 keeps scroll/hover going to the window under the cursor.
 hl.config({ input = { follow_mouse = 2 } })
+
+-- 鼠标在浮动窗口与平铺窗口之间移动时，不要自动换焦点（默认 1 会换）。
+-- 搭配上面的 follow_mouse = 2：只有点击或 Alt+Tab 才会切换焦点，跟 Win11 一样。
+hl.config({ input = { float_switch_override_focus = 0 } })
