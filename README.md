@@ -8,10 +8,11 @@
 前提：新电脑已经装好 Omarchy，并且登录进 Hyprland 桌面。
 
 ```bash
-gh auth login                      # 登录 GitHub（私有仓库需要）
-gh repo clone omarchy-desktop ~/omarchy-desktop
+git clone https://github.com/TuMi9889/omarchy-desktop.git ~/omarchy-desktop
 cd ~/omarchy-desktop && ./install.sh
 ```
+
+仓库是公开的，下载不需要登录；只有之后要用 `./sync.sh --push` 上传修改时才需要 `gh auth login`。
 
 - 会问一次 sudo 密码（安装编译标题栏插件用的 cmake/meson/ninja）。
 - 不想装标题栏：`./install.sh --no-hyprbars`。
