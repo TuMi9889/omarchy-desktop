@@ -7,6 +7,10 @@
 
 ---
 
+## 2026-10-10 新增插件 fred.keyboard（使用者自行安装）
+
+- 由 `sync.sh` 收录到 `plugins/plugins.tsv`（固定 commit），`install.sh` 会一并安装。
+
 ## 2026-10-10 本机：远程桌面改用 Sunshine + Moonlight（不入库，仅记录）
 
 **现行设定**（`~/.config/sunshine/sunshine.conf`，含配对凭证，不入库）：
