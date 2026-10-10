@@ -7,6 +7,58 @@
 
 ---
 
+## 2026-10-10 Alt+Tab 切到的窗口一律到最上层（平铺窗口自动改浮动）
+
+- **问题**：Alt+Tab（或点击）切到某些窗口，窗口取得焦点却没到最上层。
+- **原因**：被切到的是**平铺**窗口（例如按过 `Super+W` 的 Chromium）。Hyprland 固定规则：浮动窗口永远在
+  平铺窗口之上，`alter_zorder` 对平铺窗口无效，也没有设定可改。
+- **修改**：`hypr/hyprland.lua` 的 `window.active` 处理：聚焦到平铺窗口时先
+  `hl.dsp.window.float({ action = "enable" })` 再提到最上层；全屏窗口（`w.fullscreen ~= 0`）不动。
+  使用者选择此方案：代价是平铺窗口一被聚焦就变浮动，平铺实际上留不住。
+- **验证**：A 设平铺并压在 B 下，聚焦 A → A 变浮动且在 B 之上。
+
+## 2026-10-10 聚焦已最小化的窗口会还原（修正「窗口被关在最小化区」）
+
+- **问题**：窗口看得到却在 `special:minimized` 里，切工作区就消失；新开窗口也掉进最小化区；Dock 不隐藏。
+- **原因**（以 `.socket2.sock` 事件记录查出）：Alt+Tab 等动作**聚焦一个已最小化的窗口**时，Hyprland
+  会把整个最小化区打开而不是还原窗口；之后新窗口都开在打开着的最小化区里。
+- **修改**：
+  - `hypr/hyprland.lua` 的 `window.active`：被聚焦的窗口若在 `special:minimized`，移回目前工作区、
+    关掉最小化区、重新聚焦（同 Win11 的 Alt+Tab 还原）。
+  - 最小化改用 `hl.dsp.window.move({ ..., workspace = "special:minimized", follow = false })`：
+    不打开最小化区、不聚焦窗口，否则上面的处理会马上把刚最小化的窗口还原回来（测试时实际发生过）。
+    改在 `hypr/scripts/snap.sh` 与 Dock 的 `scripts/dock-minimize.py`（patch 已更新）。
+- **验证**：`Win+↓` 最小化、聚焦它（模拟 Alt+Tab）、Dock 最小化、Dock 还原，四条路径结果正确，
+  最小化区始终关闭。
+- 上一节「未解」的成因即此，已解决。
+
+## 2026-10-10 Super+空格 切换输入法；单按 Super 开 Omarchy 选单
+
+- **修改**：`hypr/bindings.lua`
+  - `hl.unbind("SUPER + SPACE")`（原为 Omarchy 选单），改绑 `fcitx5-remote -t`（英文 ↔ Rime）。
+  - 单按 Super 开选单：**不用** `{ release = true }` 绑定——实测 Hyprland 的 release 绑定在 `Super+空格`
+    这类组合键放开时也会触发。改为 `hl.on("input.keyboard.key", ...)` 自行判断：按住 Super
+    期间有按过其他键就视为组合键，不开选单。
+- **Hyprland 0.56 键盘事件**：回调参数 `(keycode, ?, pressed)`，keycode 为 xkb 码，Super_L=133、Super_R=134，
+  pressed 按下=1／放开=0。`hl.is_key_down()` 在事件当下回报的是**处理该事件之前**的状态，不能拿来判断放开。
+- **测试陷阱**：`wtype` 用自己的临时键盘配置，keycode 与真实键盘不同，且送 Super 组合键会让选单
+  莫名打开（无绑定的 `Super+F12` 也会）——用 wtype 测 Super 相关行为**不可信**，要真实键盘确认。
+  判断逻辑另以 `_G.omarchy_super_tap(code, 0, pressed)` 直接喂序列测试（6 种序列皆正确）。
+- **验证**：使用者以真实键盘确认 `Super+空格` 切换正常；诊断记录显示每次按一次只触发一次。
+- **注意**：fcitx5 默认**每个窗口各自**记输入法状态（Win11 默认全域共用）；可改 fcitx5 `ShareInputState`，尚未改。
+
+## 2026-10-10 本机：hypr-rdp 远程桌面（不入库，仅记录）
+
+- 写在 `~/.config/hypr/local.lua`（`o.launch_on_start("hypr-rdp")`），设定 `~/.config/hypr-rdp/config.toml`
+  含明文密码，**刻意不入库**，权限 600。
+- `bind = "0.0.0.0:3389"`（原写死 IP，DHCP 换 IP 会起不来）、`output = "eDP-1"`（远程看笔电本身屏幕，不另开虚拟屏幕）。
+- 防火墙：Omarchy 默认开 ufw，需 `sudo ufw allow from 192.168.2.0/24 to any port 3389 proto tcp`。
+- 新电脑要用 RDP：装 `hypr-rdp`、建 config、在该机 `local.lua` 加自动启动、开防火墙。
+
+## 2026-10-10 Shibumi 顶栏排列（使用者在顶栏内调整）
+
+- `omarchy/shell.json` 的 Shibumi 区块变动（栏位排列、显示项目），由 sync.sh 收录。
+
 ## 2026-10-10 鼠标移过窗口不再自动聚焦
 
 - **问题**：鼠标移到某些窗口上就会直接聚焦，不像 Win11 那样要点击或 Alt+Tab。
@@ -58,7 +110,7 @@
   - **插件修改** `rosakodu.dock/scripts/dock-minimize.py` 的 `close_any_special`：改用字符串参数。
     （与上面的 Dock 修改同在 `plugins/patches/rosakodu.dock.patch`）
 - **验证**：`Win+↓` 最小化、Dock 点击还原、Dock 右键最小化三条路径，事后 special 都是关着的。
-- **未解**：窗口偶尔仍会停在「打开的最小化区」里，成因还没查明。排查方法：用 Hyprland 的
+- **（已解决，见上方「聚焦已最小化的窗口会还原」）** 窗口偶尔停在「打开的最小化区」里。排查方法：用 Hyprland 的
   `.socket2.sock` 事件记录 `movewindow` / `activespecial` 的时间点，对照当时的操作。
 
 ## 2026-10-10 Win11 风格标题栏（hyprbars）

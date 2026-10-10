@@ -101,7 +101,7 @@ state_file="$state_dir/$addr"
 
 case $target in
   minimize)
-    dispatch "hl.dsp.window.move({ window = \"$window\", workspace = \"special:minimized\" })"
+    dispatch "hl.dsp.window.move({ window = \"$window\", workspace = \"special:minimized\", follow = false })"
     # 移进 special 工作区会顺带把它打开；跟 Dock 一样立刻关回去，
     # 否则最小化区会一直盖在画面上，Dock 也会以为工作区是空的而不隐藏。
     hyprctl monitors -j | jq -r '.[].specialWorkspace.name // empty' | while read -r sw; do

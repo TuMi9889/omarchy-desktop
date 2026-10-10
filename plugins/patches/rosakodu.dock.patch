@@ -13,7 +13,7 @@ index 3e45390..c3b3a1a 100644
  
  // Whether the keyboard shortcut may toggle the dock. Everything but "hover"
 diff --git c/scripts/dock-minimize.py w/scripts/dock-minimize.py
-index 297f7fc..a354358 100755
+index 297f7fc..dfb4fa4 100755
 --- c/scripts/dock-minimize.py
 +++ w/scripts/dock-minimize.py
 @@ -224,7 +224,7 @@ def close_any_special(sock_path):
@@ -25,3 +25,12 @@ index 297f7fc..a354358 100755
      except Exception:
          pass
  
+@@ -710,7 +710,7 @@ def main():
+             close_any_special(sock_path)
+         else:
+             # MINIMIZE target_c
+-            cmd = f'dispatch hl.dsp.window.move({{ window = "address:{addr}", workspace = "special:minimized" }})'
++            cmd = f'dispatch hl.dsp.window.move({{ window = "address:{addr}", workspace = "special:minimized", follow = false }})'
+             res = hypr_cmd(sock_path, cmd)
+             if "error" in res.lower():
+                 hypr_cmd(sock_path, f"dispatch movetoworkspacesilent special:minimized,address:{addr}")

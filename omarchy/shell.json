@@ -110,6 +110,7 @@
         },
         "order": {
           "center": [
+            "G3",
             "G8"
           ],
           "left": [
@@ -119,7 +120,7 @@
             "G13",
             "G6",
             "G10",
-            "G3"
+            ""
           ],
           "right": [
             "G9",
@@ -172,31 +173,34 @@
         },
         "splits": {
           "boundaries": [
-            false,
+            true,
             true
           ],
-          "center": [],
+          "center": [
+            false
+          ],
           "left": [
             true,
             true,
+            false,
             true,
-            true,
-            true,
+            false,
             true
           ],
           "right": [
             true,
             true,
-            true,
-            true,
-            true,
-            true,
+            false,
+            false,
+            false,
+            false,
             false
           ]
         },
         "v1SlotRoles": {
           "center": [
-            "base"
+            "base",
+            "extra"
           ],
           "left": [
             "base",
@@ -399,7 +403,7 @@
           }
         },
         "workspace": {
-          "mode": "5",
+          "mode": "10",
           "style": "pacman",
           "version": 1
         }
