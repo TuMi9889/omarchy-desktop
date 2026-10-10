@@ -1,17 +1,18 @@
 -- Win11 风格标题栏（hyprbars 插件）：右侧依序为 最小化 / 最大化-还原 / 关闭。
 -- 插件由 hyprpm 编译；Hyprland 更新后若标题栏消失，执行 `hyprpm update` 重新编译。
 -- 载入失败（未安装、版本不符）时整段跳过，不影响其他配置。
+--
+-- 不可在配置里直接 hl.plugin.load：冷启动时载入插件会触发配置重载，重载时插件尚未挂上
+-- 又再载入一次 → reload/handlePluginLoads 无限递归，Hyprland 卡死、登入后黑屏（2026-10-10 实测）。
+-- 改为启动完成后用 hyprctl 载入，再 reload 让下面的按钮设置生效。
 
-if not hl.plugin.hyprbars then
+if not (hl.plugin.hyprbars and hl.plugin.hyprbars.add_button) then
   local so = "/var/cache/hyprpm/" .. (os.getenv("USER") or "") .. "/hyprland-plugins/hyprbars.so"
   local f = io.open(so, "r")
   if f then
     f:close()
-    pcall(hl.plugin.load, so)
+    o.exec_on_start("hyprctl plugin load '" .. so .. "' && hyprctl reload")
   end
-end
-
-if not (hl.plugin.hyprbars and hl.plugin.hyprbars.add_button) then
   return
 end
 

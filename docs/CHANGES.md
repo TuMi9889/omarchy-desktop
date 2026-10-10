@@ -7,6 +7,19 @@
 
 ---
 
+## 2026-10-10 修复：重开机登入后黑屏（hyprbars 载入造成无限重载）
+
+- **问题**：重开机输入密码后整个画面黑屏、没有游标，只能进 TTY。
+- **原因**：`titlebars.lua` 在配置里直接 `hl.plugin.load` hyprbars。冷启动时载入插件会触发配置重载，
+  重载时插件还没挂上又再载入 → `reload()`↔`handlePluginLoads()` 无限递归（gdb 主线程栈实测），
+  Hyprland 卡死、CPU 满载，30 秒后被 uwsm/systemd 超时杀掉。执行中 reload 不会触发，所以之前没发现。
+- **修改**：改成启动完成后才载入：`o.exec_on_start("hyprctl plugin load <so> && hyprctl reload")`。
+- **文件**：`hypr/titlebars.lua`
+- **验证**：TTY 下实际启动 Hyprland：`hyprctl monitors` 正常、`hyprctl plugin list` 有 hyprbars、`configerrors` 为空。
+- **注意**：不要在 Lua 配置里直接 `hl.plugin.load`。
+
+---
+
 ## 2026-10-10 单按 Super 开选单：排除 Super+鼠标操作
 
 - **问题**：Super+左键拖动窗口、Super+右键调整大小后，放开 Super 会打开选单。
