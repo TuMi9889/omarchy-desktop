@@ -7,6 +7,41 @@
 
 ---
 
+## 2026-10-10 本机：远程桌面改用 Sunshine + Moonlight（不入库，仅记录）
+
+**现行设定**（`~/.config/sunshine/sunshine.conf`，含配对凭证，不入库）：
+
+```
+capture = kms
+encoder = nvenc
+origin_web_ui_allowed = pc
+```
+
+- 套件：Omarchy 软件库的 `sunshine`（2026.516，**非 CUDA 版**）。开机自启：
+  `systemctl --user enable --now app-dev.lizardbyte.app.Sunshine.service`。
+- 防火墙（只开局域网）：TCP 47984,47989,48010；UDP 47998:48000,48002,48010。管理网页 47990 只限本机。
+- 键鼠：套件的 udev 规则让使用者可写 `/dev/uinput`，不需额外设定。
+- 客户端：Windows 上的 Moonlight，配对时到 https://localhost:47990 输入 PIN。
+- **实测效能**：串流 1080p 约 28 fps、网络延迟 1 ms、零丢包；sunshine 约 180% CPU。
+
+**为什么只有 ~28 fps（双显卡笔电的硬件限制）**：笔电屏幕由 Intel 内显驱动，画面在内显上；
+NVENC 在 RTX 3060。非 CUDA 版会走「内显 → 内存 → 3060」，4K 截屏后在 CPU 缩放与转色，因此卡在约 30 fps。
+
+**试过但失败的路（不要再重试）**：
+
+| 尝试 | 结果 |
+|---|---|
+| hypr-rdp（RDP） | 可用但只能 VAAPI；NVIDIA 的 VAAPI 驱动不能编码；内显 4K H.264 约 30 fps。已弃用并移除 |
+| 官方 CUDA 版 `sunshine-bin` + `cuda` + NVENC + KMS | 3060 无法汇入内显的 dmabuf：`Couldn't import RGB Image: 00003004`，黑画面后在 libcuda 崩溃 |
+| 同上 + `capture = wlr` | 同样的汇入错误，黑画面 |
+| `sunshine-bin` + VAAPI（Intel，`adapter_name` 指定 iGPU） | 画面异常、无输入、SIGABRT 崩溃 |
+| Omarchy 版 + VAAPI（Intel） | 同样无法使用 |
+
+**仍可能改善的方向（未试）**：外接一台接在 NVIDIA 输出口的屏幕并串流那台（画面直接在 3060 上，免搬运）；
+或 BIOS/厂商工具若有独显直连（MUX）模式。
+
+**换电脑时**：装 `sunshine`、写上面的 conf、enable 服务、开防火墙、重新配对。
+
 ## 2026-10-10 Alt+Tab 切到的窗口一律到最上层（平铺窗口自动改浮动）
 
 - **问题**：Alt+Tab（或点击）切到某些窗口，窗口取得焦点却没到最上层。
@@ -47,7 +82,7 @@
 - **验证**：使用者以真实键盘确认 `Super+空格` 切换正常、单按 Super 会开选单；诊断记录显示每次按一次只触发一次。
 - **注意**：fcitx5 默认**每个窗口各自**记输入法状态（Win11 默认全域共用）；可改 fcitx5 `ShareInputState`，尚未改。
 
-## 2026-10-10 本机：hypr-rdp 远程桌面（不入库，仅记录）
+## 2026-10-10 本机：hypr-rdp 远程桌面（已弃用，改 Sunshine，见上方）
 
 - 写在 `~/.config/hypr/local.lua`（`o.launch_on_start("hypr-rdp")`），设定 `~/.config/hypr-rdp/config.toml`
   含明文密码，**刻意不入库**，权限 600。
