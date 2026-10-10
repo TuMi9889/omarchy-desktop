@@ -7,6 +7,20 @@
 
 ---
 
+## 2026-10-10 单按 Super 开选单：排除 Super+鼠标操作
+
+- **问题**：Super+左键拖动窗口、Super+右键调整大小后，放开 Super 会打开选单。
+- **原因**：判断只看键盘事件；Hyprland 0.56 的 Lua **没有鼠标按键事件**（只有 `input.keyboard.key`），
+  鼠标操作不会被标记为组合键。
+- **修改**：`hypr/bindings.lua` 另绑 `SUPER + mouse:272`、`SUPER + mouse:273`，回调为 Lua 函数、
+  `{ non_consuming = true }`：只在 Super 按住期间做「组合」标记，点击照常交给 Omarchy 原本的
+  拖动（`hl.dsp.window.drag`）/调整大小（`hl.dsp.window.resize`）绑定。
+- **曾试过、被使用者否决**：以「按住 Super 期间鼠标移动 > 8px」判断。太粗糙——边移动鼠标边点 Super 会开不了选单。
+- **验证**：逻辑以 `_G.omarchy_super_tap` / `_G.omarchy_super_mouse` 喂序列测试（5 种情况正确）；
+  使用者以真实鼠标确认：拖动、调整大小正常且放开不开选单，单按与边移动边点 Super 都会开选单。
+- **测试陷阱**：`wtype` 送出的按键**不会触发 Hyprland 绑定**（之前 `Super+空格` 看似成功，是 fcitx5 自己处理的），
+  无法用来测快捷键；Hyprland 也没有模拟鼠标点击的方法。
+
 ## 2026-10-10 新增插件 fred.keyboard（使用者自行安装）
 
 - 由 `sync.sh` 收录到 `plugins/plugins.tsv`（固定 commit），`install.sh` 会一并安装。

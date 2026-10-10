@@ -54,8 +54,11 @@ hl.unbind("SUPER + SPACE")
 o.bind("SUPER + SPACE", "Toggle input method", "fcitx5-remote -t")
 
 -- 单按 Super 开选单。不用 release 绑定：Hyprland 的 release 绑定在 Super+空格 等组合键
--- 放开时也会触发。改为监听按键事件：按住 Super 期间若按过其他键就视为组合键，不开选单。
--- 133/134 = Super_L/Super_R 的 xkb keycode（事件参数：keycode, ?, 按下=1/放开=0）。
+-- 放开时也会触发。改为自行判断：按住 Super 期间若按过其他键、或按过鼠标左/右键
+-- （Super+拖动窗口、Super+右键调整大小），就视为组合操作，不开选单。
+-- 133/134 = Super_L/Super_R 的 xkb keycode（input.keyboard.key 参数：keycode, ?, 按下=1/放开=0）。
+-- Hyprland 没有鼠标按键事件，所以另绑不拦截（non_consuming）的 Super+左/右键，只做标记；
+-- 点击照常交给 Omarchy 原本的拖动/调整大小绑定。
 do
   local SUPER = { [133] = true, [134] = true }
   local held, combo = false, false
@@ -73,5 +76,11 @@ do
       combo = true
     end
   end
+  _G.omarchy_super_mouse = function()
+    if held then combo = true end
+  end
   hl.on("input.keyboard.key", _G.omarchy_super_tap)
+  for _, button in ipairs({ "mouse:272", "mouse:273" }) do
+    hl.bind("SUPER + " .. button, _G.omarchy_super_mouse, { non_consuming = true })
+  end
 end
